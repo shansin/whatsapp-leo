@@ -467,6 +467,33 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 		}
+
+		// Send message details as POST to localhost:8081
+		messageData := map[string]interface{}{
+			"id":          msg.Info.ID,
+			"chat_jid":    chatJID,
+			"chat_name":   name,
+			"sender":      sender,
+			"content":     content,
+			"timestamp":   msg.Info.Timestamp.Format(time.RFC3339),
+			"is_from_me":  msg.Info.IsFromMe,
+			"media_type":  mediaType,
+			"filename":    filename,
+			"url":         url,
+			"file_length": fileLength,
+		}
+
+		jsonData, jsonErr := json.Marshal(messageData)
+		if jsonErr != nil {
+			logger.Warnf("Failed to marshal message data for POST: %v", jsonErr)
+		} else {
+			resp, postErr := http.Post("http://localhost:8081", "application/json", bytes.NewBuffer(jsonData))
+			if postErr != nil {
+				logger.Warnf("Failed to POST message to localhost:8081: %v", postErr)
+			} else {
+				resp.Body.Close()
+			}
+		}
 	}
 }
 
