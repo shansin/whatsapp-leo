@@ -103,7 +103,7 @@ async def take_action(data: dict) -> dict:
         now = datetime.now(ZoneInfo("America/Los_Angeles"))
         current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
     
-        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. You are able interact with whatsapp though whatsapp mcp server. Please respond to user's query through whatsapp mcp server in helpful and concise manner. Do not ask followup questions. Just do the task and finish."
+        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. You are able interact with whatsapp though whatsapp mcp server. Please respond to user's message through whatsapp mcp server in helpful and concise manner. Do not ask followup questions. Just do the task and finish."
 
         #Push MCP Server instantiation
         whatsapp_mcp_server_params = {"command": "uv", "args": [

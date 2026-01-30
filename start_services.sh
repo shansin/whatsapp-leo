@@ -20,22 +20,22 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# Start the Go WhatsApp bridge server
-echo "[1/2] Starting Go WhatsApp bridge server..."
-cd "$PROJECT_DIR/whatsapp-mcp/whatsapp-bridge"
-go run . &
-GO_PID=$!
-echo "      Go server started (PID: $GO_PID)"
-
-# Give the Go server a moment to start
-sleep 2
-
 # Start the Python agent server
-echo "[2/2] Starting Python agent server..."
+echo "[1/2] Starting Python agent server..."
 cd "$PROJECT_DIR"
 uv run python agent/agent.py &
 AGENT_PID=$!
 echo "      Agent server started (PID: $AGENT_PID)"
+
+# Give the agent server a moment to start
+sleep 2
+
+# Start the Go WhatsApp bridge server
+echo "[2/2] Starting Go WhatsApp bridge server..."
+cd "$PROJECT_DIR/whatsapp-mcp/whatsapp-bridge"
+go run . &
+GO_PID=$!
+echo "      Go server started (PID: $GO_PID)"
 
 echo ""
 echo "✓ All services started!"
