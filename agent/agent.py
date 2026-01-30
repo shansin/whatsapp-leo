@@ -23,6 +23,7 @@ SOCKET_PATH = "/tmp/whatsapp-leo.sock"
 load_dotenv(override=True)
 
 ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+model_name = os.getenv("MODEL_NAME")
 
 # Task queue for background processing
 task_queue = queue.Queue()
@@ -98,7 +99,7 @@ async def reply_to_message(data: dict) -> dict:
     if("#leo" in message.content.lower()):
         print("[Agent Server] Leo mentioned!")
         client = AsyncOpenAI(base_url= ollama_base_url, api_key="ollama")
-        model = OpenAIChatCompletionsModel(model="gpt-oss:20b", openai_client=client)
+        model = OpenAIChatCompletionsModel(model=model_name, openai_client=client)
         
         from datetime import datetime
         from zoneinfo import ZoneInfo
