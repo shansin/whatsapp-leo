@@ -708,10 +708,16 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
-// Start a REST API server to expose the WhatsApp client functionality
+// Unix socket path for REST API
+const BridgeSocketPath = "/tmp/whatsapp-bridge.sock"
+
+// Start a REST API server to expose the WhatsApp client functionality via Unix socket
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	// Create a new ServeMux for routing
+	mux := http.NewServeMux()
+
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -757,7 +763,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -807,13 +813,29 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
-	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
+	// Remove existing socket file if it exists
+	if err := os.Remove(BridgeSocketPath); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("Warning: Failed to remove existing socket file: %v\n", err)
+	}
+
+	// Create Unix domain socket listener
+	listener, err := net.Listen("unix", BridgeSocketPath)
+	if err != nil {
+		fmt.Printf("Failed to create Unix socket: %v\n", err)
+		return
+	}
+
+	// Set socket permissions so other processes can connect
+	if err := os.Chmod(BridgeSocketPath, 0666); err != nil {
+		fmt.Printf("Warning: Failed to set socket permissions: %v\n", err)
+	}
+
+	fmt.Printf("Starting REST API server on Unix socket %s...\n", BridgeSocketPath)
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		server := &http.Server{Handler: mux}
+		if err := server.Serve(listener); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
