@@ -12,8 +12,15 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Starting WhatsApp Leo services..."
 
+# Flag to prevent cleanup from running twice
+CLEANUP_DONE=0
+
 # Function to cleanup background processes on exit
 cleanup() {
+    if [ $CLEANUP_DONE -eq 1 ]; then
+        return
+    fi
+    CLEANUP_DONE=1
     echo ""
     echo "Shutting down services..."
     kill $GO_PID $AGENT_PID 2>/dev/null || true

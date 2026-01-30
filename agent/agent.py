@@ -124,7 +124,7 @@ async def take_action(data: dict) -> dict:
             with trace("Leo"):
                 from dataclasses import asdict
                 result = await Runner.run(agent, json.dumps(asdict(message)))
-            print(result.final_output)
+            print(f"[Agent Server] Result: {result.final_output}")
 
     
     return {"status": "success", "message": "Action taken", "received": data}
@@ -159,7 +159,7 @@ def handle_client(client_socket: socket.socket):
         
         # Queue the task for background processing
         task_queue.put(message_data)
-        print(f"[Server] Task queued (queue size: {task_queue.qsize()})")
+        print(f"[Agent Server] Task queued (queue size: {task_queue.qsize()})")
         
         # Send immediate response
         response = json.dumps({
@@ -170,7 +170,7 @@ def handle_client(client_socket: socket.socket):
         client_socket.sendall(response.encode())
         
     except Exception as e:
-        print(f"[Server] Error handling client: {e}")
+        print(f"[Agent Server] Error handling client: {e}")
     finally:
         client_socket.close()
 
@@ -189,7 +189,7 @@ def run_server():
     # Set socket permissions so other processes can connect
     os.chmod(SOCKET_PATH, 0o666)
     
-    print(f"Unix domain socket server running at {SOCKET_PATH}")
+    print(f"Unix domain socket Agent Server running at {SOCKET_PATH}")
     print("Press Ctrl+C to stop")
     
     try:
@@ -203,7 +203,7 @@ def run_server():
             )
             client_thread.start()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        print("\nShutting down Agent Server...")
     finally:
         server_socket.close()
         # Clean up socket file
