@@ -2,6 +2,7 @@
 
 # Start Services Script
 # Starts both the Go WhatsApp bridge server and the Python agent server
+# Communication between services uses Unix domain socket at /tmp/whatsapp-leo.sock
 
 set -e
 
@@ -15,6 +16,8 @@ cleanup() {
     echo "Shutting down services..."
     kill $GO_PID $AGENT_PID 2>/dev/null || true
     wait $GO_PID $AGENT_PID 2>/dev/null || true
+    # Clean up socket file
+    rm -f /tmp/whatsapp-leo.sock
     echo "Services stopped."
 }
 
@@ -40,7 +43,7 @@ echo "      Go server started (PID: $GO_PID)"
 echo ""
 echo "✓ All services started!"
 echo "  - Go server (WhatsApp bridge): http://localhost:8080"
-echo "  - Agent server: http://localhost:8081"
+echo "  - Agent server: /tmp/whatsapp-leo.sock (Unix socket)"
 echo ""
 echo "Press Ctrl+C to stop all services"
 

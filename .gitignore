@@ -1,3 +1,4 @@
 *.db
 whatsapp.log
 .env
+agent/__pycache__/agent.cpython-313.pyc

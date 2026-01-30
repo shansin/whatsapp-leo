@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -487,11 +488,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		if jsonErr != nil {
 			logger.Warnf("Failed to marshal message data for POST: %v", jsonErr)
 		} else {
-			resp, postErr := http.Post("http://localhost:8081", "application/json", bytes.NewBuffer(jsonData))
-			if postErr != nil {
-				logger.Warnf("Failed to POST message to localhost:8081: %v", postErr)
+			// Connect to Python agent via Unix domain socket
+			conn, dialErr := net.Dial("unix", "/tmp/whatsapp-leo.sock")
+			if dialErr != nil {
+				logger.Warnf("Failed to connect to agent socket: %v", dialErr)
 			} else {
-				resp.Body.Close()
+				_, writeErr := conn.Write(jsonData)
+				if writeErr != nil {
+					logger.Warnf("Failed to write to agent socket: %v", writeErr)
+				}
+				conn.Close()
 			}
 		}
 	}

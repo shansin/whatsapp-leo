@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Simple HTTP server that listens on port 8081 for POST requests."""
+"""Unix domain socket server for receiving WhatsApp messages from Go bridge."""
 
 from dataclasses import dataclass
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 from dotenv import load_dotenv
 from openai import OpenAI
 import os
+import socket
 from agents import Agent, Runner, trace, OpenAIChatCompletionsModel, input_guardrail, GuardrailFunctionOutput
 from pydantic import BaseModel
 from openai import AsyncOpenAI
@@ -16,6 +16,9 @@ import asyncio
 from agents.mcp import MCPServerStdio
 import threading
 import queue
+
+# Socket path for Unix domain socket
+SOCKET_PATH = "/tmp/whatsapp-leo.sock"
 
 load_dotenv(override=True)
 
@@ -127,53 +130,85 @@ async def take_action(data: dict) -> dict:
     return {"status": "success", "message": "Action taken", "received": data}
 
 
-class RequestHandler(BaseHTTPRequestHandler):
-    """Handle incoming HTTP requests."""
-    
-    def do_POST(self):
-        """Handle POST requests by calling take_action."""
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
+def handle_client(client_socket: socket.socket):
+    """Handle a single client connection."""
+    try:
+        # Receive data from the client
+        data = b""
+        while True:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            # Check if we've received a complete JSON message
+            try:
+                json.loads(data.decode())
+                break  # Valid JSON, we're done receiving
+            except json.JSONDecodeError:
+                continue  # Keep receiving
+        
+        if not data:
+            return
         
         try:
-            data = json.loads(body) if body else {}
+            message_data = json.loads(data.decode())
         except json.JSONDecodeError:
-            self.send_response(400)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+            response = json.dumps({"error": "Invalid JSON"})
+            client_socket.sendall(response.encode())
             return
         
         # Queue the task for background processing
-        task_queue.put(data)
+        task_queue.put(message_data)
         print(f"[Server] Task queued (queue size: {task_queue.qsize()})")
         
-        # Send immediate response (202 Accepted = request accepted for processing)
-        self.send_response(202)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps({
+        # Send immediate response
+        response = json.dumps({
             "status": "queued",
             "message": "Task queued for processing",
             "queue_size": task_queue.qsize()
-        }).encode())
+        })
+        client_socket.sendall(response.encode())
+        
+    except Exception as e:
+        print(f"[Server] Error handling client: {e}")
+    finally:
+        client_socket.close()
+
+
+def run_server():
+    """Start the Unix domain socket server."""
+    # Remove existing socket file if it exists
+    if os.path.exists(SOCKET_PATH):
+        os.unlink(SOCKET_PATH)
     
-    def log_message(self, format, *args):
-        """Override to customize logging."""
-        print(f"[{self.log_date_time_string()}] {args[0]}")
-
-
-def run_server(port: int = 8081):
-    """Start the HTTP server."""
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, RequestHandler)
-    print(f"Server running on http://localhost:{port}")
+    # Create Unix domain socket
+    server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server_socket.bind(SOCKET_PATH)
+    server_socket.listen(5)
+    
+    # Set socket permissions so other processes can connect
+    os.chmod(SOCKET_PATH, 0o666)
+    
+    print(f"Unix domain socket server running at {SOCKET_PATH}")
     print("Press Ctrl+C to stop")
+    
     try:
-        httpd.serve_forever()
+        while True:
+            client_socket, _ = server_socket.accept()
+            # Handle each client in a separate thread
+            client_thread = threading.Thread(
+                target=handle_client, 
+                args=(client_socket,),
+                daemon=True
+            )
+            client_thread.start()
     except KeyboardInterrupt:
         print("\nShutting down server...")
-        httpd.shutdown()
+    finally:
+        server_socket.close()
+        # Clean up socket file
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
 
 
 if __name__ == "__main__":
