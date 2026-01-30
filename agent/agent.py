@@ -118,15 +118,15 @@ async def reply_to_message(data: dict) -> dict:
         }
         async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
             agent = Agent(name="Leo", 
-            instructions=Instruction,
-            mcp_servers=[whatsapp_mcp_server],
-            model=model)
+                instructions=Instruction,
+                mcp_servers=[whatsapp_mcp_server],
+                model=model)
 
-            with trace("Leo"):
+            with trace("LeoWhatsappAssistant"):
                 from dataclasses import asdict
                 result = await Runner.run(agent, json.dumps(asdict(message)))
-            print(f"[Agent Server] Result: {result.final_output}")
 
+            print(f"[Agent Server] Result: {result.final_output}")
     
     return {"status": "success", "message": "Action taken", "received": data}
 
