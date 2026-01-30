@@ -35,12 +35,12 @@ def worker():
             data = task_queue.get()
             if data is None:  # Shutdown signal
                 break
-            print(f"[Worker] Processing task from queue (queue size: {task_queue.qsize()})")
-            asyncio.run(take_action(data))
+            print(f"[Agent Worker] Processing task from queue (queue size: {task_queue.qsize()})")
+            asyncio.run(reply_to_message(data))
             task_queue.task_done()
-            print(f"[Worker] Task completed (queue size: {task_queue.qsize()})")
+            print(f"[Agent Worker] Task completed (queue size: {task_queue.qsize()})")
         except Exception as e:
-            print(f"[Worker] Error processing task: {e}")
+            print(f"[Agent Worker] Error processing task: {e}")
             task_queue.task_done()
 
 
@@ -81,7 +81,7 @@ class ReceivedMessage:
         )
 
 
-async def take_action(data: dict) -> dict:
+async def reply_to_message(data: dict) -> dict:
     """
     Process the incoming request data.
     
@@ -93,10 +93,10 @@ async def take_action(data: dict) -> dict:
     """
     # Parse incoming data into ReceivedMessage structure
     message = ReceivedMessage.from_dict(data)
-    print(f"Received message: {message}")
+    print(f"[Agent Server] Received message: {message}")
 
     if("#leo" in message.content.lower()):
-        print("Leo mentioned!")
+        print("[Agent Server] Leo mentioned!")
         client = AsyncOpenAI(base_url= ollama_base_url, api_key="ollama")
         model = OpenAIChatCompletionsModel(model="gpt-oss:20b", openai_client=client)
         
