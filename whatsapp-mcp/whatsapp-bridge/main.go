@@ -217,10 +217,37 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	isJID := strings.Contains(recipient, "@")
 
 	if isJID {
-		// Parse the JID string
-		recipientJID, err = types.ParseJID(recipient)
-		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+		// Handle @lid (Linked ID) format - need to look up the actual phone number
+		// LID is a privacy-focused identifier that cannot be used for sending messages directly
+		// The LID number is NOT a phone number - we must look up the real PN from the store
+		if strings.HasSuffix(recipient, "@lid") {
+			// Parse the LID JID first
+			lidJID, parseErr := types.ParseJID(recipient)
+			if parseErr != nil {
+				return false, fmt.Sprintf("Error parsing LID JID: %v", parseErr)
+			}
+
+			// Look up the actual phone number from the LID mapping
+			pnJID, lookupErr := client.Store.LIDs.GetPNForLID(context.Background(), lidJID)
+			if lookupErr != nil {
+				// Fallback: try using the LID user part as phone number (might work in some cases)
+				fmt.Printf("[WARN] Could not resolve LID to PN: %v. Trying fallback with user part.\n", lookupErr)
+				user := strings.TrimSuffix(recipient, "@lid")
+				recipientJID = types.JID{
+					User:   user,
+					Server: "s.whatsapp.net",
+				}
+				fmt.Printf("[DEBUG] Fallback: Using user part as phone: %s -> %s\n", recipient, recipientJID.String())
+			} else {
+				recipientJID = pnJID
+				fmt.Printf("[DEBUG] Resolved LID to PN: %s -> %s\n", recipient, recipientJID.String())
+			}
+		} else {
+			// Parse the JID string
+			recipientJID, err = types.ParseJID(recipient)
+			if err != nil {
+				return false, fmt.Sprintf("Error parsing JID: %v", err)
+			}
 		}
 	} else {
 		// Create JID from phone number

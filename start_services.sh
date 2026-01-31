@@ -45,7 +45,9 @@ sleep 2
 # Start the Go WhatsApp bridge server
 echo "[2/2] Starting Go WhatsApp bridge server..."
 cd "$PROJECT_DIR/whatsapp-mcp/whatsapp-bridge"
-go run . &
+# Build first to ensure we have the latest binary
+go build -o whatsapp-bridge .
+./whatsapp-bridge &
 GO_PID=$!
 echo "      Go server started (PID: $GO_PID)"
 

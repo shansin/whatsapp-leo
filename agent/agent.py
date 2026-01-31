@@ -23,16 +23,17 @@ SOCKET_PATH = "/tmp/whatsapp-leo.sock"
 
 load_dotenv(override=True)
 
-MAX_AGENTS = int(os.getenv("MAX_AGENTS"))
-TTL_SECONDS = int(os.getenv("TTL_SECONDS"))
-
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 
+MAX_AGENTS = int(os.getenv("MAX_AGENTS"))
+TTL_SECONDS = int(os.getenv("TTL_SECONDS"))
+
 
 class AgentFactory:
-    """Factory for creating and caching Agent instances with LRU eviction and TTL."""
-    
+    """Factory for creating and caching Agent instances with LRU eviction and TTL.
+    this is needed for agent to maintain conversation history """
+
     def __init__(self):
         # OrderedDict to maintain LRU order: most recently used at the end
         # Each entry stores: (Agent, MCPServerStdio, SQLiteSession, last_used_timestamp)
@@ -114,7 +115,6 @@ agent_factory = AgentFactory()
 # Task queue for background processing
 task_queue = queue.Queue()
 
-
 def worker():
     """Background worker that processes tasks from the queue."""
     while True:
@@ -129,7 +129,6 @@ def worker():
         except Exception as e:
             print(f"[Agent Worker] Error processing task: {e}")
             task_queue.task_done()
-
 
 # Start the worker thread
 worker_thread = threading.Thread(target=worker, daemon=True)
@@ -167,7 +166,6 @@ class ReceivedMessage:
             url=data.get("url", ""),
         )
 
-
 async def reply_to_message(data: dict) -> dict:
     """
     Process the incoming request data.
@@ -193,7 +191,7 @@ async def reply_to_message(data: dict) -> dict:
         now = datetime.now(ZoneInfo("America/Los_Angeles"))
         current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
     
-        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. Do not ask followup questions. Just answer and finish."
+        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. Do not ask followup questions. Just answer and finish."
 
         #Push MCP Server instantiation
         whatsapp_mcp_server_params = {"command": "uv", "args": [
