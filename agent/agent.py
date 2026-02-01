@@ -145,6 +145,7 @@ class ReceivedMessage:
     id: str
     is_from_me: bool
     media_type: str
+    phone_number: str
     sender: str
     timestamp: str
     url: str
@@ -161,6 +162,7 @@ class ReceivedMessage:
             id=data.get("id", ""),
             is_from_me=data.get("is_from_me", False),
             media_type=data.get("media_type", ""),
+            phone_number=data.get("phone_number", ""),
             sender=data.get("sender", ""),
             timestamp=data.get("timestamp", ""),
             url=data.get("url", ""),
@@ -191,7 +193,7 @@ async def reply_to_message(data: dict) -> dict:
         now = datetime.now(ZoneInfo("America/Los_Angeles"))
         current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
     
-        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. Do not ask followup questions. Just answer and finish."
+        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. You must use send_message() function to send the response. Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. Do not ask followup questions. Just answer and finish."
 
         #Push MCP Server instantiation
         whatsapp_mcp_server_params = {"command": "uv", "args": [

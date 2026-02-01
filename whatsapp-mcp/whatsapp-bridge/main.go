@@ -496,19 +496,35 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
 		}
 
+		// Resolve phone number from sender JID (handle LID format)
+		phoneNumber := sender
+		senderJIDStr := msg.Info.Sender.String()
+		if strings.HasSuffix(senderJIDStr, "@lid") {
+			// Try to resolve LID to actual phone number
+			pnJID, lookupErr := client.Store.LIDs.GetPNForLID(context.Background(), msg.Info.Sender)
+			if lookupErr != nil {
+				logger.Warnf("Could not resolve LID to PN for sender %s: %v", senderJIDStr, lookupErr)
+				// Fallback: use the sender user part
+				phoneNumber = sender
+			} else {
+				phoneNumber = pnJID.User
+			}
+		}
+
 		// Send message details as POST to localhost:8081
 		messageData := map[string]interface{}{
-			"id":          msg.Info.ID,
-			"chat_jid":    chatJID,
-			"chat_name":   name,
-			"sender":      sender,
-			"content":     content,
-			"timestamp":   msg.Info.Timestamp.Format(time.RFC3339),
-			"is_from_me":  msg.Info.IsFromMe,
-			"media_type":  mediaType,
-			"filename":    filename,
-			"url":         url,
-			"file_length": fileLength,
+			"id":           msg.Info.ID,
+			"chat_jid":     chatJID,
+			"chat_name":    name,
+			"sender":       sender,
+			"phone_number": phoneNumber,
+			"content":      content,
+			"timestamp":    msg.Info.Timestamp.Format(time.RFC3339),
+			"is_from_me":   msg.Info.IsFromMe,
+			"media_type":   mediaType,
+			"filename":     filename,
+			"url":          url,
+			"file_length":  fileLength,
 		}
 
 		jsonData, jsonErr := json.Marshal(messageData)
