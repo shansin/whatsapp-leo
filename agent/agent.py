@@ -12,7 +12,7 @@ from agents import Agent, Runner, trace, OpenAIChatCompletionsModel, input_guard
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 from agents import function_tool
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 import asyncio
 from agents.mcp import MCPServerStdio
 import threading
@@ -28,6 +28,7 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 
 MAX_AGENTS = int(os.getenv("MAX_AGENTS"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS"))
+brave_env = os.environ.copy()
 
 
 class AgentFactory:
@@ -36,8 +37,8 @@ class AgentFactory:
 
     def __init__(self):
         # OrderedDict to maintain LRU order: most recently used at the end
-        # Each entry stores: (Agent, MCPServerStdio, SQLiteSession, last_used_timestamp)
-        self._agents: OrderedDict[str, Tuple[Agent, MCPServerStdio, SQLiteSession, float]] = OrderedDict()
+        # Each entry stores: (Agent, List[MCPServerStdio], SQLiteSession, last_used_timestamp)
+        self._agents: OrderedDict[str, Tuple[Agent, List[MCPServerStdio], SQLiteSession, float]] = OrderedDict()
         self._lock = threading.Lock()
     
     def _is_expired(self, last_used: float) -> bool:
@@ -45,18 +46,18 @@ class AgentFactory:
         import time
         return (time.time() - last_used) > TTL_SECONDS
     
-    async def get_agent(self, chat_jid: str, mcp_server: MCPServerStdio, model, instructions: str) -> Tuple[Agent, SQLiteSession]:
+    async def get_agent(self, chat_jid: str, mcp_servers: List[MCPServerStdio], model, instructions: str) -> Tuple[Agent, SQLiteSession]:
         """
         Get or create an Agent for the given chat_jid.
         
         If an agent exists for this chat_jid, it is reused and marked as recently used.
-        The agent's mcp_servers is always updated with the current (active) MCP server.
+        The agent's mcp_servers is always updated with the current (active) MCP servers.
         If a new agent is needed and capacity is exceeded, the least recently used agent is evicted.
         Agents not used within 20 minutes are discarded and recreated.
         
         Args:
             chat_jid: The WhatsApp chat JID to identify the agent
-            mcp_server: The MCP server instance to use
+            mcp_servers: List of MCP server instances to use
             model: The model to use for the agent
             instructions: The instructions for the agent
             
@@ -78,10 +79,10 @@ class AgentFactory:
                 else:
                     # Move to end (most recently used) and update timestamp
                     self._agents.move_to_end(chat_jid)
-                    # Update the agent's mcp_servers with the new active server
-                    # The old server connection is closed after each async with block
-                    agent.mcp_servers = [mcp_server]
-                    self._agents[chat_jid] = (agent, mcp_server, session, current_time)
+                    # Update the agent's mcp_servers with the new active servers
+                    # The old server connections are closed after each async with block
+                    agent.mcp_servers = mcp_servers
+                    self._agents[chat_jid] = (agent, mcp_servers, session, current_time)
                     print(f"[AgentFactory] Reusing agent for chat_jid: {chat_jid} (cache size: {len(self._agents)})")
                     return agent, session
             
@@ -94,12 +95,12 @@ class AgentFactory:
             agent = Agent(
                 name="Leo",
                 instructions=instructions,
-                mcp_servers=[mcp_server],
+                mcp_servers=mcp_servers,
                 model=model
             )
             # Create a unique session for this chat_jid to maintain conversation history
             session = SQLiteSession(chat_jid)
-            self._agents[chat_jid] = (agent, mcp_server, session, current_time)
+            self._agents[chat_jid] = (agent, mcp_servers, session, current_time)
             print(f"[AgentFactory] Created new agent for chat_jid: {chat_jid} (cache size: {len(self._agents)})")
             return agent, session
     
@@ -195,26 +196,29 @@ async def reply_to_message(data: dict) -> dict:
     
         Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. You must use send_message() function to send the response. Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. Do not ask followup questions. Just answer and finish."
 
-        #Push MCP Server instantiation
+        # MCP Server instantiation
         whatsapp_mcp_server_params = {"command": "uv", "args": [
-        "--directory",
-        "/home/shant/git_linux/whatsapp-leo/whatsapp-mcp/whatsapp-mcp-server",
-        "run", 
-        "main.py"]
+            "--directory",
+            "/home/shant/git_linux/whatsapp-leo/whatsapp-mcp/whatsapp-mcp-server",
+            "run", 
+            "main.py"]
         }
-        async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
-            agent, session = await agent_factory.get_agent(
-                chat_jid=message.chat_jid,
-                mcp_server=whatsapp_mcp_server,
-                model=model,
-                instructions=Instruction
-            )
+        brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
+        
+        async with MCPServerStdio(params=brave_params, client_session_timeout_seconds=30) as brave_server:
+            async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
+                agent, session = await agent_factory.get_agent(
+                    chat_jid=message.chat_jid,
+                    mcp_servers=[whatsapp_mcp_server, brave_server],
+                    model=model,
+                    instructions=Instruction
+                )
 
-            with trace("LeoWhatsappAssistant"):
-                from dataclasses import asdict
-                result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
+                with trace("LeoWhatsappAssistant"):
+                    from dataclasses import asdict
+                    result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
 
-            print(f"[Agent Server] Result: {result.final_output}")
+                print(f"[Agent Server] Result: {result.final_output}")
     
     return {"status": "success", "message": "Action taken", "received": data}
 
