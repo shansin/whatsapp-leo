@@ -28,6 +28,7 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 
 MAX_AGENTS = int(os.getenv("MAX_AGENTS"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS"))
+ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()]
 brave_env = os.environ.copy()
 
 
@@ -183,7 +184,7 @@ async def reply_to_message(data: dict) -> dict:
     message = ReceivedMessage.from_dict(data)
     print(f"[Agent Server] Received message: {message}")
 
-    if("#leo" in message.content.lower() or "@leo" in message.content.lower()):
+    if(("#leo" in message.content.lower() or "@leo" in message.content.lower()) and message.phone_number in ALLOWED_SENDERS):
         print("[Agent Server] Leo mentioned!")
         client = AsyncOpenAI(base_url= OLLAMA_BASE_URL, api_key="ollama")
         model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=client)
@@ -193,10 +194,46 @@ async def reply_to_message(data: dict) -> dict:
     
         now = datetime.now(ZoneInfo("America/Los_Angeles"))
         current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
+        
     
-        Instruction = f"Date and time right now is {current_time}. You are a helpful assistant called #leo. Please respond to user's message in a helpful and concise manner using send_message() function from whatsapp-mcp-server. You must use send_message() function to send the response. Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. Do not ask followup questions. Just answer and finish."
+    
+        Instruction = f"""Date and time right now is {current_time}. 
+    
+        You are a powerful assistant called Leo. You MUST interact with user through whatsapp-mcp-server. 
+        
+        You can help with:
+        - **General topics and queries**: from your knowledge base
+        - **Web search**: using brave search
+        - **Google Docs**: Create, read, find, update (append/replace/insert), and move documents.
+        - **Google Drive**: Find/create folders, search for files, and download files.
+        - **Google Calendar**: List calendars, view events, create/update/delete events, respond to invites, and find free time.
+        - **Google Sheets**: Read content, get ranges, find spreadsheets, and get metadata.
+        - **Google Slides**: Read text, find presentations, and get metadata.
+        - **Gmail**: Search threads, draft/send emails, manage labels.
+    
+        **Important Rules:**
+        1. **User Interaction**:
+           - You MUST respond to user's message using send_message() function from whatsapp-mcp-server. 
+           - Use the FULL chat_jid value (including the @lid or @s.whatsapp.net suffix) as the recipient parameter. 
+           - Do not ask followup questions. Just answer and finish.
+        2. **Safety**: 
+           - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
+           - Ask for explicit user confirmation for destructive actions or sending messages.
+        3. **Be concise, helpful, and professional.
+    """
 
         # MCP Server instantiation
+        workspace_server_path = "/home/shant/git_linux/workspace/workspace-server/dist/index.js"
+        
+        workspace_mcp_server_params = {
+            "command": "node",
+            "args": [workspace_server_path, "--use-dot-names"],
+            "env": {
+                "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
+                "PATH": os.environ["PATH"]
+            }
+        }
+
         whatsapp_mcp_server_params = {"command": "uv", "args": [
             "--directory",
             "/home/shant/git_linux/whatsapp-leo/whatsapp-mcp/whatsapp-mcp-server",
@@ -205,20 +242,21 @@ async def reply_to_message(data: dict) -> dict:
         }
         brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
         
-        async with MCPServerStdio(params=brave_params, client_session_timeout_seconds=30) as brave_server:
-            async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
-                agent, session = await agent_factory.get_agent(
-                    chat_jid=message.chat_jid,
-                    mcp_servers=[whatsapp_mcp_server, brave_server],
-                    model=model,
-                    instructions=Instruction
-                )
+        async with MCPServerStdio(params=brave_params, client_session_timeout_seconds=30) as brave_mcp_server:
+            async with MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300) as workspace_mcp_server:
+                async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
+                    agent, session = await agent_factory.get_agent(
+                        chat_jid=message.chat_jid,
+                        mcp_servers=[whatsapp_mcp_server, brave_mcp_server, workspace_mcp_server],
+                        model=model,
+                        instructions=Instruction
+                    )
 
-                with trace("LeoWhatsappAssistant"):
-                    from dataclasses import asdict
-                    result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
+                    with trace("LeoWhatsappAssistant"):
+                        from dataclasses import asdict
+                        result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
 
-                print(f"[Agent Server] Result: {result.final_output}")
+                    print(f"[Agent Server] Result: {result.final_output}")
     
     return {"status": "success", "message": "Action taken", "received": data}
 
