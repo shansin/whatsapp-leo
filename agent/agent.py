@@ -183,7 +183,7 @@ async def reply_to_message(data: dict) -> dict:
     message = ReceivedMessage.from_dict(data)
     print(f"[Agent Server] Received message: {message}")
 
-    if("#leo" in message.content.lower()):
+    if("#leo" in message.content.lower() or "@leo" in message.content.lower()):
         print("[Agent Server] Leo mentioned!")
         client = AsyncOpenAI(base_url= OLLAMA_BASE_URL, api_key="ollama")
         model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=client)
