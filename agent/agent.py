@@ -127,8 +127,12 @@ async def process_message(data: dict):
     logger.info(f"Received message from {message.sender}: {message.content[:50]}...")
 
     is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
-    if is_leo_mentioned and message.phone_number in ALLOWED_SENDERS:
-        logger.info("Leo mentioned! Processing...")
+    
+    if is_leo_mentioned:
+        logger.info(f"Leo mentioned by {message.sender}! Processing...")
+        
+        # Check if sender is allowed to use Workspace features
+        is_allowed = message.phone_number in ALLOWED_SENDERS
         
         try:
             client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
@@ -136,27 +140,35 @@ async def process_message(data: dict):
             
             from datetime import datetime
             from zoneinfo import ZoneInfo
+            from contextlib import AsyncExitStack
         
             now = datetime.now(ZoneInfo("America/Los_Angeles"))
             current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
             
-            Instruction = f"""Date and time right now is {current_time}. 
+            # Base instructions for everyone
+            base_instruction = f"""Date and time right now is {current_time}. 
         
-            You are a powerful assistant called Leo. You MUST interact with user through whatsapp-mcp-server. 
+            You are a powerful assistant called Leo. You MUST respond to user's message using send_message() tool from whatsapp-mcp-server. 
             
             You can help with:
             - **General topics and queries**: from your knowledge base
             - **Web search**: using brave search
+            """
+            
+            # Workspace instructions only for allowed users
+            workspace_instruction = """
             - **Google Docs**: Create, read, find, update (append/replace/insert), and move documents.
             - **Google Drive**: Find/create folders, search for files, and download files.
             - **Google Calendar**: List calendars, view events, create/update/delete events, respond to invites, and find free time.
             - **Google Sheets**: Read content, get ranges, find spreadsheets, and get metadata.
             - **Google Slides**: Read text, find presentations, and get metadata.
             - **Gmail**: Search threads, draft/send emails, manage labels.
-        
+            """
+            
+            common_rules = f"""
             **Important Rules:**
             1. **User Interaction**:
-               - You MUST respond to user's message using send_message() function from whatsapp-mcp-server. 
+               - You MUST respond to user's message using send_message() tool from whatsapp-mcp-server. 
                - Use the FULL chat_jid value ({message.chat_jid}) as the recipient parameter. 
                - Do not ask followup questions. Just answer and finish.
             2. **Safety**: 
@@ -165,23 +177,33 @@ async def process_message(data: dict):
             3. **Be concise, helpful, and professional.
             """
 
+            # Compose final instructions based on permission
+            if is_allowed:
+                Instruction = base_instruction + workspace_instruction + common_rules
+            else:
+                Instruction = base_instruction + common_rules
+
             # MCP Server Configuration
             workspace_mcp_server_params = {
                 "command": "node",
                 "args": [WORKSPACE_MCP_PATH, "--use-dot-names"],
-                "env": {
-                    "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
-                    "PATH": os.environ["PATH"]
-                }
+                # "env": {
+                #     "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
+                #     "PATH": os.environ["PATH"]
+                # }
             }
+            # Add env from original code if needed, but it looked mostly like PATH pass-through + specific var
+            # Re-adding explicitly to be safe, though os.environ.copy() might be safer if we want full env.
+            # The previous code had:
+            # "env": {
+            #     "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
+            #     "PATH": os.environ["PATH"]
+            # }
+            workspace_env = os.environ.copy()
+            workspace_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"
+            workspace_mcp_server_params["env"] = workspace_env
 
-            whatsapp_mcp_server_params = {
-                "command": "uv", 
-                "args": ["run", WHATSAPP_MCP_PATH] # Assuming run inside uv venv or with uv run script
-            }
-            # Fix params for UV run if needed based on original file:
-            # original: ["--directory", "...", "run", "main.py"]
-            # simplified to use the path we got from env or default
+
             whatsapp_dir = os.path.dirname(WHATSAPP_MCP_PATH)
             whatsapp_script = os.path.basename(WHATSAPP_MCP_PATH)
             whatsapp_mcp_server_params = {
@@ -197,20 +219,29 @@ async def process_message(data: dict):
             brave_env = os.environ.copy()
             brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
             
-            async with MCPServerStdio(params=brave_params, client_session_timeout_seconds=30) as brave_mcp_server:
-                async with MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300) as workspace_mcp_server:
-                    async with MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120) as whatsapp_mcp_server:
-                        agent, session = await agent_factory.get_agent(
-                            chat_jid=message.chat_jid,
-                            mcp_servers=[whatsapp_mcp_server, brave_mcp_server, workspace_mcp_server],
-                            model=model,
-                            instructions=Instruction
-                        )
+            async with AsyncExitStack() as stack:
+                # Always start Brave and Whatsapp
+                brave_mcp_server = await stack.enter_async_context(MCPServerStdio(params=brave_params, client_session_timeout_seconds=30))
+                whatsapp_mcp_server = await stack.enter_async_context(MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120))
+                
+                mcp_servers = [whatsapp_mcp_server, brave_mcp_server]
+                
+                # Conditionally start Workspace MCP
+                if is_allowed:
+                    workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300))
+                    mcp_servers.append(workspace_mcp_server)
 
-                        with trace("LeoWhatsappAssistant"):
-                            result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
+                agent, session = await agent_factory.get_agent(
+                    chat_jid=message.chat_jid,
+                    mcp_servers=mcp_servers,
+                    model=model,
+                    instructions=Instruction
+                )
 
-                        logger.info(f"Agent execution completed. Result: {result.final_output}")
+                with trace("LeoWhatsappAssistant"):
+                    result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
+
+                logger.info(f"Agent execution completed. Result: {result.final_output}")
 
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
