@@ -7,11 +7,17 @@ import json
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 import os
+import sys
 import asyncio
 import logging
 from agents import Agent, Runner, trace, OpenAIChatCompletionsModel, SQLiteSession
 from agents.mcp import MCPServerStdio
 from typing import Dict, List, Tuple
+
+# Add whatsapp-mcp-server to path for direct imports
+WHATSAPP_MCP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-mcp', 'whatsapp-mcp-server')
+sys.path.insert(0, WHATSAPP_MCP_DIR)
+from whatsapp import send_message as whatsapp_send_message
 
 # Configure logging
 logging.basicConfig(
@@ -34,7 +40,7 @@ ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(","
 
 # MCP Server Paths
 WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shant/git_linux/workspace/workspace-server/dist/index.js")
-WHATSAPP_MCP_PATH = os.getenv("WHATSAPP_MCP_PATH", "/home/shant/git_linux/whatsapp-leo/whatsapp-mcp/whatsapp-mcp-server/main.py")
+# WHATSAPP_MCP_PATH removed - using direct whatsapp.py imports instead
 
 class AgentFactory:
     """Factory for creating and caching Agent instances with LRU eviction and TTL."""
@@ -148,7 +154,7 @@ async def process_message(data: dict):
             # Base instructions for everyone
             base_instruction = f"""Date and time right now is {current_time}. 
         
-            You are a powerful assistant called Leo. You MUST respond to user's message using send_message() tool from whatsapp-mcp-server. 
+            You are a powerful assistant called Leo. Respond helpfully to the user's message.
             
             You can help with:
             - **General topics and queries**: from your knowledge base
@@ -168,12 +174,11 @@ async def process_message(data: dict):
             common_rules = f"""
             **Important Rules:**
             1. **User Interaction**:
-               - You MUST respond to user's message using send_message() tool from whatsapp-mcp-server. 
-               - Use the FULL chat_jid value ({message.chat_jid}) as the recipient parameter. 
+               - Respond directly with your answer. Your response will be sent to the user automatically.
                - Do not ask followup questions. Just answer and finish.
             2. **Safety**: 
                - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
-               - Ask for explicit user confirmation for destructive actions or sending messages.
+               - Ask for explicit user confirmation for destructive actions.
             3. **Be concise, helpful, and professional.
             """
 
@@ -204,27 +209,14 @@ async def process_message(data: dict):
             workspace_mcp_server_params["env"] = workspace_env
 
 
-            whatsapp_dir = os.path.dirname(WHATSAPP_MCP_PATH)
-            whatsapp_script = os.path.basename(WHATSAPP_MCP_PATH)
-            whatsapp_mcp_server_params = {
-                "command": "uv",
-                "args": [
-                    "--directory",
-                    whatsapp_dir,
-                    "run",
-                    whatsapp_script
-                ]
-            }
-
             brave_env = os.environ.copy()
             brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
             
             async with AsyncExitStack() as stack:
-                # Always start Brave and Whatsapp
+                # Start Brave MCP server (WhatsApp is handled via direct function calls)
                 brave_mcp_server = await stack.enter_async_context(MCPServerStdio(params=brave_params, client_session_timeout_seconds=30))
-                whatsapp_mcp_server = await stack.enter_async_context(MCPServerStdio(params=whatsapp_mcp_server_params, client_session_timeout_seconds=120))
                 
-                mcp_servers = [whatsapp_mcp_server, brave_mcp_server]
+                mcp_servers = [brave_mcp_server]
                 
                 # Conditionally start Workspace MCP
                 if is_allowed:
@@ -242,6 +234,14 @@ async def process_message(data: dict):
                     result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
 
                 logger.info(f"Agent execution completed. Result: {result.final_output}")
+                
+                # Send the agent's response directly via WhatsApp
+                if result.final_output:
+                    success, send_result = whatsapp_send_message(message.chat_jid, result.final_output)
+                    if success:
+                        logger.info(f"Message sent successfully to {message.chat_jid}")
+                    else:
+                        logger.error(f"Failed to send message to {message.chat_jid}: {send_result}")
 
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
