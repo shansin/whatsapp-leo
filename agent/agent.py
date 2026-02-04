@@ -27,16 +27,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AgentServer")
 
-# Socket path for Unix domain socket
-SOCKET_PATH = "/tmp/whatsapp-leo.sock"
-
 load_dotenv(override=True)
+
+# Get instance GUID for multi-instance support
+INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
+
+# Socket path for Unix domain socket (supports multi-instance via INSTANCE_GUID)
+SOCKET_PATH = os.getenv("AGENT_SOCKET_PATH", f"/tmp/whatsapp-leo-{INSTANCE_GUID}.sock")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
 ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()]
+LEO_MENTION_ID = os.getenv("LEO_MENTION_ID", "@23833461416078")
 
 # MCP Server Paths
 WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shant/git_linux/workspace/workspace-server/dist/index.js")
@@ -129,12 +133,15 @@ class ReceivedMessage:
 
 async def process_message(data: dict):
     """Process a single message asynchronously."""
+    logger.info(f"Full message payload: {json.dumps(data, indent=2)}")
     message = ReceivedMessage.from_dict(data)
-    logger.info(f"Received message from {message.sender}: {message.content[:50]}...")
-
-    is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
     
-    if is_leo_mentioned:
+    # Respond if: DM (ends with @lid) OR group mention (@g in jid AND @23833461416078 in content)
+    is_dm = message.chat_jid.endswith("@lid")
+    is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
+    should_leo_respond = is_dm or is_group_mention
+    
+    if should_leo_respond:
         logger.info(f"Leo mentioned by {message.sender}! Processing...")
         
         # Check if sender is allowed to use Workspace features
@@ -179,7 +186,13 @@ async def process_message(data: dict):
             2. **Safety**: 
                - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
                - Ask for explicit user confirmation for destructive actions.
-            3. **Be concise, helpful, and professional.
+            3. **Formatting**: Use WhatsApp-compatible formatting in your responses:
+               - *bold* for emphasis (wrap text with single asterisks)
+               - _italic_ for subtle emphasis (wrap text with underscores)
+               - ~strikethrough~ for corrections (wrap text with tildes)
+               - ```code``` for code or technical terms (wrap with triple backticks)
+               - Use bullet points with - or • for lists
+            4. **Be concise, helpful, and professional.**
             """
 
             # Compose final instructions based on permission

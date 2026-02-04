@@ -7,9 +7,15 @@ import socket
 import http.client
 import json
 import audio
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-BRIDGE_SOCKET_PATH = "/tmp/whatsapp-bridge.sock"
+
+# Get instance GUID for multi-instance support  
+INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
+BRIDGE_SOCKET_PATH = os.getenv("BRIDGE_SOCKET_PATH", f"/tmp/whatsapp-bridge-{INSTANCE_GUID}.sock")
 
 
 class UnixSocketHTTPConnection(http.client.HTTPConnection):

@@ -1,7 +1,5 @@
 *.db
 whatsapp.log
 .env
-agent/__pycache__/agent.cpython-313.pyc
-whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
-agent/__pycache__/agent.cpython-312.pyc
+agent/__pycache__/
 whatsapp-mcp/whatsapp-bridge/whatsapp-bridge

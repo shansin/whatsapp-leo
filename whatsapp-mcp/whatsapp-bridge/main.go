@@ -532,7 +532,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			logger.Warnf("Failed to marshal message data for POST: %v", jsonErr)
 		} else {
 			// Connect to Python agent via Unix domain socket
-			conn, dialErr := net.Dial("unix", "/tmp/whatsapp-leo.sock")
+			agentSocketPath := getAgentSocketPath()
+			conn, dialErr := net.Dial("unix", agentSocketPath)
 			if dialErr != nil {
 				logger.Warnf("Failed to connect to agent socket: %v", dialErr)
 			} else {
@@ -751,8 +752,28 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
-// Unix socket path for REST API
-const BridgeSocketPath = "/tmp/whatsapp-bridge.sock"
+// Get socket paths from environment with defaults (supports multi-instance via INSTANCE_GUID)
+func getBridgeSocketPath() string {
+	if path := os.Getenv("BRIDGE_SOCKET_PATH"); path != "" {
+		return strings.Trim(path, `"'`)
+	}
+	guid := strings.Trim(os.Getenv("INSTANCE_GUID"), `"'`)
+	if guid == "" {
+		guid = "default"
+	}
+	return fmt.Sprintf("/tmp/whatsapp-bridge-%s.sock", guid)
+}
+
+func getAgentSocketPath() string {
+	if path := os.Getenv("AGENT_SOCKET_PATH"); path != "" {
+		return strings.Trim(path, `"'`)
+	}
+	guid := strings.Trim(os.Getenv("INSTANCE_GUID"), `"'`)
+	if guid == "" {
+		guid = "default"
+	}
+	return fmt.Sprintf("/tmp/whatsapp-leo-%s.sock", guid)
+}
 
 // Start a REST API server to expose the WhatsApp client functionality via Unix socket
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
@@ -857,23 +878,24 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Remove existing socket file if it exists
-	if err := os.Remove(BridgeSocketPath); err != nil && !os.IsNotExist(err) {
+	bridgeSocketPath := getBridgeSocketPath()
+	if err := os.Remove(bridgeSocketPath); err != nil && !os.IsNotExist(err) {
 		fmt.Printf("Warning: Failed to remove existing socket file: %v\n", err)
 	}
 
 	// Create Unix domain socket listener
-	listener, err := net.Listen("unix", BridgeSocketPath)
+	listener, err := net.Listen("unix", bridgeSocketPath)
 	if err != nil {
 		fmt.Printf("Failed to create Unix socket: %v\n", err)
 		return
 	}
 
 	// Set socket permissions so other processes can connect
-	if err := os.Chmod(BridgeSocketPath, 0666); err != nil {
+	if err := os.Chmod(bridgeSocketPath, 0666); err != nil {
 		fmt.Printf("Warning: Failed to set socket permissions: %v\n", err)
 	}
 
-	fmt.Printf("Starting REST API server on Unix socket %s...\n", BridgeSocketPath)
+	fmt.Printf("Starting REST API server on Unix socket %s...\n", bridgeSocketPath)
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
