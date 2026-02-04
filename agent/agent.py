@@ -129,8 +129,8 @@ class ReceivedMessage:
 
 async def process_message(data: dict):
     """Process a single message asynchronously."""
+    logger.info(f"Full message payload: {json.dumps(data, indent=2)}")
     message = ReceivedMessage.from_dict(data)
-    logger.info(f"Received message from {message.sender}: {message.content[:50]}...")
 
     is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
     
@@ -179,7 +179,13 @@ async def process_message(data: dict):
             2. **Safety**: 
                - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
                - Ask for explicit user confirmation for destructive actions.
-            3. **Be concise, helpful, and professional.
+            3. **Formatting**: Use WhatsApp-compatible formatting in your responses:
+               - *bold* for emphasis (wrap text with single asterisks)
+               - _italic_ for subtle emphasis (wrap text with underscores)
+               - ~strikethrough~ for corrections (wrap text with tildes)
+               - ```code``` for code or technical terms (wrap with triple backticks)
+               - Use bullet points with - or • for lists
+            4. **Be concise, helpful, and professional.**
             """
 
             # Compose final instructions based on permission
