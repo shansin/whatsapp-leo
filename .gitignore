@@ -3,3 +3,5 @@ whatsapp.log
 .env
 agent/__pycache__/
 whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+whatsapp-mcp/whatsapp-bridge/whatsapp-client

@@ -43,7 +43,7 @@ ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(","
 LEO_MENTION_ID = os.getenv("LEO_MENTION_ID", "@23833461416078")
 
 # MCP Server Paths
-WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shant/git_linux/workspace/workspace-server/dist/index.js")
+WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shsin/git_linux/workspace/workspace-server/dist/index.js")
 # WHATSAPP_MCP_PATH removed - using direct whatsapp.py imports instead
 
 class AgentFactory:
