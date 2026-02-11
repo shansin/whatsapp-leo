@@ -176,6 +176,7 @@ async def process_message(data: dict):
             - **Google Sheets**: Read content, get ranges, find spreadsheets, and get metadata.
             - **Google Slides**: Read text, find presentations, and get metadata.
             - **Gmail**: Search threads, draft/send emails, manage labels.
+            - **Garmin Connect**: Access fitness and health data from Garmin devices.
             """
             
             common_rules = f"""
@@ -224,6 +225,8 @@ async def process_message(data: dict):
 
             brave_env = os.environ.copy()
             brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
+
+            garmin_mcp_server_params = {"command": "uvx", "args": ["git+https://github.com/Taxuspt/garmin_mcp"]}
             
             async with AsyncExitStack() as stack:
                 # Start Brave MCP server (WhatsApp is handled via direct function calls)
@@ -235,6 +238,9 @@ async def process_message(data: dict):
                 if is_allowed:
                     workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300))
                     mcp_servers.append(workspace_mcp_server)
+
+                    garmin_mcp_server = await stack.enter_async_context(MCPServerStdio(params=garmin_mcp_server_params, client_session_timeout_seconds=120))
+                    mcp_servers.append(garmin_mcp_server)
 
                 agent, session = await agent_factory.get_agent(
                     chat_jid=message.chat_jid,
