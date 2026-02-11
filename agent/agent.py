@@ -182,7 +182,8 @@ async def process_message(data: dict):
             common_rules = f"""
             **Important Rules:**
             1. **User Interaction**:
-               - Respond directly with your answer. Your response will be sent to the user automatically.
+               - Respond directly with your answer. Your response will be sent to the user automatically on chat.
+               - Use emojis to make responses more engaging.
                - Do not ask followup questions. Just answer and finish.
             2. **Safety**: 
                - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
@@ -192,6 +193,7 @@ async def process_message(data: dict):
                - _italic_ for subtle emphasis (wrap text with underscores)
                - ~strikethrough~ for corrections (wrap text with tildes)
                - ```code``` for code or technical terms (wrap with triple backticks)
+               - Don't use tables
                - Use bullet points with - or • for lists
             4. **Be concise, helpful, and professional.**
             """
