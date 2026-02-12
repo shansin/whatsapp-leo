@@ -143,9 +143,14 @@ async def process_message(data: dict):
     """Process a single message asynchronously."""
     logger.info(f"Full message payload: {json.dumps(data, indent=2)}")
     message = ReceivedMessage.from_dict(data)
-    
+
+    is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
+
     # ── Handle #remindme (allowed senders only) ──────────────────────────
     if "#remindme" in message.content.lower() and message.phone_number in ALLOWED_SENDERS:
+        if not IS_DEDICATED_NUMBER and not is_leo_mentioned:
+            return
+
         try:
             parsed = parse_remindme(message.content)
             if parsed:
@@ -178,8 +183,7 @@ async def process_message(data: dict):
         is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
         should_leo_respond = is_dm or is_group_mention
     else:
-        should_leo_respond = "#leo" in message.content.lower() or "@leo" in message.content.lower()
-
+        should_leo_respond = is_leo_mentioned
     
     if should_leo_respond:
         logger.info(f"Leo mentioned by {message.sender}! Processing...")
