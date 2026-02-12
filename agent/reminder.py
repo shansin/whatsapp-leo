@@ -1,75 +1,16 @@
-"""Reminder module for WhatsApp Leo — parse, validate, persist, and schedule reminders."""
+"""Reminder module for WhatsApp Leo — validate, persist, and schedule reminders."""
 
-import re
 import sqlite3
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple
 
 logger = logging.getLogger("Reminder")
 
 TZ = ZoneInfo("America/Los_Angeles")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "store", "reminders.db")
-
-# ── Relative-time patterns ───────────────────────────────────────────────────
-_RELATIVE_PATTERN = re.compile(
-    r"in\s+(\d+)\s+(minute|minutes|min|mins|hour|hours|hr|hrs|day|days|week|weeks)",
-    re.IGNORECASE,
-)
-
-_UNIT_MAP = {
-    "minute": "minutes", "minutes": "minutes", "min": "minutes", "mins": "minutes",
-    "hour": "hours", "hours": "hours", "hr": "hours", "hrs": "hours",
-    "day": "days", "days": "days",
-    "week": "weeks", "weeks": "weeks",
-}
-
-# ── #remindme regex ──────────────────────────────────────────────────────────
-_REMINDME_PATTERN = re.compile(r"#remindme\s+(.+)", re.IGNORECASE)
-
-
-# ── Parsing ──────────────────────────────────────────────────────────────────
-
-def parse_remindme(content: str) -> Optional[Tuple[datetime, str]]:
-    """Parse a message for #remindme <time>.
-
-    Returns (remind_at_datetime, original_message_text) or None if no #remindme found.
-    Raises ValueError if the time expression cannot be parsed.
-    """
-    match = _REMINDME_PATTERN.search(content)
-    if not match:
-        return None
-
-    time_str = match.group(1).strip()
-    # The "original message" is everything except the #remindme ... portion
-    original = _REMINDME_PATTERN.sub("", content).strip() or time_str
-
-    now = datetime.now(TZ)
-
-    # Try relative time first ("in 30 minutes", "in 2 hours", etc.)
-    rel = _RELATIVE_PATTERN.match(time_str)
-    if rel:
-        amount = int(rel.group(1))
-        unit = _UNIT_MAP[rel.group(2).lower()]
-        delta = timedelta(**{unit: amount})
-        return (now + delta, original)
-
-    # Fall back to dateutil for absolute times
-    from dateutil import parser as dateutil_parser
-
-    try:
-        parsed = dateutil_parser.parse(time_str, fuzzy=True)
-    except (ValueError, OverflowError) as exc:
-        raise ValueError(f"Could not understand the time: {time_str}") from exc
-
-    # If no timezone was provided, assume our local TZ
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=TZ)
-
-    return (parsed, original)
 
 
 # ── Validation ───────────────────────────────────────────────────────────────
