@@ -189,12 +189,28 @@ async def process_message(data: dict):
                - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
                - Ask for explicit user confirmation for destructive actions.
             3. **Formatting**: Use WhatsApp-compatible formatting in your responses:
-               - *bold* for emphasis (wrap text with single asterisks)
-               - _italic_ for subtle emphasis (wrap text with underscores)
-               - ~strikethrough~ for corrections (wrap text with tildes)
-               - ```code``` for code or technical terms (wrap with triple backticks)
-               - Don't use tables
-               - Use bullet points with - or • for lists
+                To italicize your message, place an underscore on both sides of the text:
+                _text_
+                To bold your message, place an asterisk on both sides of the text:
+                *text*
+                To strikethrough your message, place a tilde on both sides of the text:
+                ~text~
+                To monospace your message, place three backticks on both sides of the text:
+                ```text```
+                To add a bulleted list to your message, place an asterisk or hyphen and a space before each word or sentence:
+                * text
+                * text
+                Or
+                - text
+                - text
+                To add a numbered list to your message, place a number, period, and space before each line of text:
+                1. text
+                2. text
+                To add a quote to your message, place an angle bracket and space before the text:
+                > text
+                To add inline code to your message, place a backtick on both sides of the message:
+                `text`
+                Tables are not supported in WhatsApp, so do not use them.
             4. **Be concise, helpful, and professional.**
             """
 
