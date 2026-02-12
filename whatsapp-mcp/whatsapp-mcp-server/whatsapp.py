@@ -677,7 +677,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, reply_to: Optional[str] = None, reply_to_sender: Optional[str] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -687,6 +687,10 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "recipient": recipient,
             "message": message,
         }
+        if reply_to:
+            payload["reply_to"] = reply_to
+        if reply_to_sender:
+            payload["reply_to_sender"] = reply_to_sender
         
         status_code, result = make_api_request("/api/send", payload)
         

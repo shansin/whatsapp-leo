@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple
 WHATSAPP_MCP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-mcp', 'whatsapp-mcp-server')
 sys.path.insert(0, WHATSAPP_MCP_DIR)
 from whatsapp import send_message as whatsapp_send_message
+from reminder import parse_remindme, validate_reminder_time, store_reminder, ReminderScheduler
 
 # Configure logging
 logging.basicConfig(
@@ -111,6 +112,7 @@ class ReceivedMessage:
     media_type: str
     phone_number: str
     sender: str
+    sender_jid: str
     timestamp: str
     url: str
 
@@ -127,6 +129,7 @@ class ReceivedMessage:
             media_type=data.get("media_type", ""),
             phone_number=data.get("phone_number", ""),
             sender=data.get("sender", ""),
+            sender_jid=data.get("sender_jid", ""),
             timestamp=data.get("timestamp", ""),
             url=data.get("url", ""),
         )
@@ -136,6 +139,32 @@ async def process_message(data: dict):
     logger.info(f"Full message payload: {json.dumps(data, indent=2)}")
     message = ReceivedMessage.from_dict(data)
     
+    # ── Handle #remindme (allowed senders only) ──────────────────────────
+    if "#remindme" in message.content.lower() and message.phone_number in ALLOWED_SENDERS:
+        try:
+            parsed = parse_remindme(message.content)
+            if parsed:
+                remind_at, original_msg = parsed
+                validate_reminder_time(remind_at)
+                store_reminder(message.chat_jid, original_msg, remind_at, message_id=message.id, sender_jid=message.sender_jid)
+                from zoneinfo import ZoneInfo
+                confirm_time = remind_at.strftime("%b %d, %I:%M %p %Z")
+                whatsapp_send_message(
+                    message.chat_jid,
+                    f"⏰ Reminder set for *{confirm_time}*!",
+                    reply_to=message.id,
+                    reply_to_sender=message.sender_jid,
+                )
+                logger.info(f"Reminder set for {confirm_time} in {message.chat_jid}")
+                return
+        except ValueError as e:
+            whatsapp_send_message(message.chat_jid, f"❌ {e}", reply_to=message.id, reply_to_sender=message.sender_jid)
+            return
+        except Exception as e:
+            logger.error(f"Error handling #remindme: {e}", exc_info=True)
+            whatsapp_send_message(message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
+            return
+
     # Respond if: DM (ends with @lid) OR group mention (@g in jid AND @23833461416078 in content)
     is_dm = message.chat_jid.endswith("@lid")
     is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
@@ -144,7 +173,7 @@ async def process_message(data: dict):
     if should_leo_respond:
         logger.info(f"Leo mentioned by {message.sender}! Processing...")
         
-        # Check if sender is allowed to use Workspace features
+        # Check if sender is allowed to use privileged feature
         is_allowed = message.phone_number in ALLOWED_SENDERS
         
         try:
@@ -224,18 +253,8 @@ async def process_message(data: dict):
             workspace_mcp_server_params = {
                 "command": "node",
                 "args": [WORKSPACE_MCP_PATH, "--use-dot-names"],
-                # "env": {
-                #     "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
-                #     "PATH": os.environ["PATH"]
-                # }
             }
-            # Add env from original code if needed, but it looked mostly like PATH pass-through + specific var
-            # Re-adding explicitly to be safe, though os.environ.copy() might be safer if we want full env.
-            # The previous code had:
-            # "env": {
-            #     "GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE": "true",
-            #     "PATH": os.environ["PATH"]
-            # }
+
             workspace_env = os.environ.copy()
             workspace_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"
             workspace_mcp_server_params["env"] = workspace_env
@@ -252,7 +271,7 @@ async def process_message(data: dict):
                 
                 mcp_servers = [brave_mcp_server]
                 
-                # Conditionally start Workspace MCP
+                # Conditionally start privileged MCPs
                 if is_allowed:
                     workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300))
                     mcp_servers.append(workspace_mcp_server)
@@ -335,6 +354,10 @@ async def main():
     """Start the Unix domain socket server."""
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
+    
+    # Start the reminder scheduler in the background
+    scheduler = ReminderScheduler(send_fn=whatsapp_send_message)
+    asyncio.create_task(scheduler.run())
     
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o666)
