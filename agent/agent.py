@@ -30,6 +30,8 @@ logger = logging.getLogger("AgentServer")
 
 load_dotenv(override=True)
 
+IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true"
+
 # Get instance GUID for multi-instance support
 INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
 
@@ -42,10 +44,13 @@ MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
 ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()]
 LEO_MENTION_ID = os.getenv("LEO_MENTION_ID", "@23833461416078")
+IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true"
 
 # MCP Server Paths
 WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shsin/git_linux/workspace/workspace-server/dist/index.js")
-# WHATSAPP_MCP_PATH removed - using direct whatsapp.py imports instead
+
+def format_leo_response(text: str) -> str:
+    return f"Leo: {text}" if not IS_DEDICATED_NUMBER else text
 
 class AgentFactory:
     """Factory for creating and caching Agent instances with LRU eviction and TTL."""
@@ -165,10 +170,16 @@ async def process_message(data: dict):
             whatsapp_send_message(message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
             return
 
-    # Respond if: DM (ends with @lid) OR group mention (@g in jid AND @23833461416078 in content)
-    is_dm = message.chat_jid.endswith("@lid")
-    is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
-    should_leo_respond = is_dm or is_group_mention
+    should_leo_respond = False
+
+    if(IS_DEDICATED_NUMBER):
+        # Respond if: DM (ends with @lid) OR group mention (@g in jid AND @23833461416078 in content)
+        is_dm = message.chat_jid.endswith("@lid")
+        is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
+        should_leo_respond = is_dm or is_group_mention
+    else:
+        should_leo_respond = "#leo" in message.content.lower() or "@leo" in message.content.lower()
+
     
     if should_leo_respond:
         logger.info(f"Leo mentioned by {message.sender}! Processing...")
@@ -293,7 +304,7 @@ async def process_message(data: dict):
                 
                 # Send the agent's response directly via WhatsApp
                 if result.final_output:
-                    success, send_result = whatsapp_send_message(message.chat_jid, result.final_output)
+                    success, send_result = whatsapp_send_message(message.chat_jid, format_leo_response(result.final_output))
                     if success:
                         logger.info(f"Message sent successfully to {message.chat_jid}")
                     else:
