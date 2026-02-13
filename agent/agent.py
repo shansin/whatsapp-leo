@@ -106,10 +106,15 @@ def _load_instructions():
     return (
         sections.get("BASE_INSTRUCTIONS", "") + "\n",
         "\n" + sections.get("PRIVILEDGED_INSTRUCTIONS", "") + "\n",
-        "\n" + sections.get("COMMON_RULES", "")
+        "\n" + sections.get("COMMON_RULES", ""),
+        sections.get("REMINDER_INSTRUCTIONS", ""),
     )
 
-_BASE_INSTRUCTION_TEMPLATE, _PRIVILEDGED_INSTRUCTIONS, _COMMON_RULES = _load_instructions()
+_BASE_INSTRUCTION_TEMPLATE, _PRIVILEDGED_INSTRUCTIONS, _COMMON_RULES, _REMINDER_INSTRUCTIONS_TEMPLATE = _load_instructions()
+
+# Pre-built instruction templates (only {current_time} needs filling at message time)
+_INSTRUCTIONS_PRIVILEGED_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
+_INSTRUCTIONS_BASIC_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _COMMON_RULES
 
 def format_leo_response(text: str) -> str:
     return f"_*(Leo)*_ {text}" if not IS_DEDICATED_NUMBER else text
@@ -174,6 +179,14 @@ class ReminderParsed(BaseModel):
     remind_at: str
 
 
+# Cached ReminderParser agent (instructions are updated dynamically per call)
+_reminder_parser_agent = Agent(
+    name="ReminderParser",
+    instructions="",  # set dynamically before each run
+    model=_cached_model,
+    output_type=ReminderParsed,
+)
+
 async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     """Use an OpenAI agent to parse a #remindme message into (remind_at, message).
 
@@ -183,26 +196,9 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     now = datetime.now(TZ)
     current_time = now.strftime("%I:%M %p %Z, %A %B %d, %Y")
 
-    agent = Agent(
-        name="ReminderParser",
-        instructions=(
-            f"The current date and time is {current_time}.\n"
-            "You are a reminder parser. The user will give you a message that contains "
-            "a reminder request (tagged with #remindme). Your job is to extract:\n"
-            "1. `reminder_message` — what the user wants to be reminded about. "
-            "Keep it concise and natural. Do NOT include the #remindme tag or the time expression.\n"
-            "2. `remind_at` — the exact date and time the reminder should fire, as a "
-            "human-readable datetime string that dateutil can parse. Examples:\n"
-            "   - 'in 30 minutes' → compute the exact time and output e.g. '2:30 PM Feb 12, 2026'\n"
-            "   - 'at 5pm' → '5:00 PM Feb 12, 2026'\n"
-            "   - 'tomorrow at 9am' → '9:00 AM Feb 13, 2026'\n"
-            "Always include the full date and time. Use 12-hour format with AM/PM.\n"
-        ),
-        model=_cached_model,
-        output_type=ReminderParsed,
-    )
+    _reminder_parser_agent.instructions = _REMINDER_INSTRUCTIONS_TEMPLATE.format(current_time=current_time)
 
-    result = await Runner.run(agent, content)
+    result = await Runner.run(_reminder_parser_agent, content)
     parsed: ReminderParsed = result.final_output
 
     try:
@@ -253,7 +249,8 @@ class ReceivedMessage:
 
 async def process_message(data: dict):
     """Process a single message asynchronously."""
-    logger.info(f"Full message payload: {json.dumps(data, indent=2)}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Full message payload: %s", json.dumps(data, indent=2))
     message = ReceivedMessage.from_dict(data)
 
     is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
@@ -265,7 +262,8 @@ async def process_message(data: dict):
             validate_reminder_time(remind_at)
             store_reminder(message.chat_jid, original_msg, remind_at, message_id=message.id, sender_jid=message.sender_jid)
             confirm_time = remind_at.strftime("%b %d, %I:%M %p %Z")
-            whatsapp_send_message(
+            await asyncio.to_thread(
+                whatsapp_send_message,
                 message.chat_jid,
                 f"⏰ Reminder set for *{confirm_time}*!",
                 reply_to=message.id,
@@ -274,11 +272,11 @@ async def process_message(data: dict):
             logger.info(f"Reminder set for {confirm_time} in {message.chat_jid}")
             return
         except ValueError as e:
-            whatsapp_send_message(message.chat_jid, f"❌ {e}", reply_to=message.id, reply_to_sender=message.sender_jid)
+            await asyncio.to_thread(whatsapp_send_message, message.chat_jid, f"❌ {e}", reply_to=message.id, reply_to_sender=message.sender_jid)
             return
         except Exception as e:
             logger.error(f"Error handling #remindme: {e}", exc_info=True)
-            whatsapp_send_message(message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
+            await asyncio.to_thread(whatsapp_send_message, message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
             return
     
     if "#remindme" in message.content.lower():
@@ -304,14 +302,9 @@ async def process_message(data: dict):
             now = datetime.now(TZ)
             current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
             
-            # Build instructions with timestamp interpolation only
-            base_instruction = _BASE_INSTRUCTION_TEMPLATE.format(current_time=current_time)
-
-            # Compose final instructions based on permission
-            if is_allowed:
-                Instruction = base_instruction + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
-            else:
-                Instruction = base_instruction + _COMMON_RULES
+            # Use pre-built template — only interpolate the timestamp
+            template = _INSTRUCTIONS_PRIVILEGED_TEMPLATE if is_allowed else _INSTRUCTIONS_BASIC_TEMPLATE
+            Instruction = template.format(current_time=current_time)
 
             # MCP servers use pre-built param dicts from module level
             
@@ -343,7 +336,9 @@ async def process_message(data: dict):
                 
                 # Send the agent's response directly via WhatsApp
                 if result.final_output:
-                    success, send_result = whatsapp_send_message(message.chat_jid, format_leo_response(result.final_output))
+                    success, send_result = await asyncio.to_thread(
+                        whatsapp_send_message, message.chat_jid, format_leo_response(result.final_output)
+                    )
                     if success:
                         logger.info(f"Message sent successfully to {message.chat_jid}")
                     else:
@@ -355,23 +350,23 @@ async def process_message(data: dict):
 async def handle_client(reader, writer):
     """Handle a single client connection."""
     try:
-        data = b""
+        chunks = bytearray()
+        message_data = None
         while True:
             chunk = await reader.read(4096)
             if not chunk:
                 break
-            data += chunk
+            chunks.extend(chunk)
             try:
-                json.loads(data.decode())
+                message_data = json.loads(chunks)
                 break
             except json.JSONDecodeError:
                 continue
         
-        if not data:
+        if not chunks:
             return
 
-        try:
-            message_data = json.loads(data.decode())
+        if message_data is not None:
             # Process immediately in background task
             asyncio.create_task(process_message(message_data))
             
@@ -381,8 +376,7 @@ async def handle_client(reader, writer):
             })
             writer.write(response.encode())
             await writer.drain()
-            
-        except json.JSONDecodeError:
+        else:
             writer.write(b'{"error": "Invalid JSON"}')
             await writer.drain()
 

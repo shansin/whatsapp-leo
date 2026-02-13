@@ -1,7 +1,9 @@
 import sqlite3
+import threading
+import functools
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import os.path
 import socket
 import http.client
@@ -16,6 +18,17 @@ MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 # Get instance GUID for multi-instance support  
 INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
 BRIDGE_SOCKET_PATH = os.getenv("BRIDGE_SOCKET_PATH", f"/tmp/whatsapp-bridge-{INSTANCE_GUID}.sock")
+
+# ── Persistent thread-local SQLite connection ────────────────────────────────
+_local = threading.local()
+
+def _get_db() -> sqlite3.Connection:
+    """Return a persistent, thread-local SQLite connection."""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        _local.conn = conn
+    return conn
 
 
 class UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -102,9 +115,10 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+@functools.lru_cache(maxsize=256)
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         # First try matching by exact JID
@@ -142,11 +156,17 @@ def get_sender_name(sender_jid: str) -> str:
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
         return sender_jid
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
+def _batch_resolve_sender_names(messages: List[Message]) -> Dict[str, str]:
+    """Pre-resolve all unique sender JIDs in one pass for a batch of messages."""
+    resolved: Dict[str, str] = {}
+    for msg in messages:
+        if not msg.is_from_me and msg.sender not in resolved:
+            resolved[msg.sender] = get_sender_name(msg.sender)
+    return resolved
+
+
+def format_message(message: Message, show_chat_info: bool = True, sender_names: Optional[Dict[str, str]] = None) -> None:
     """Print a single message with consistent formatting."""
     output = ""
     
@@ -160,7 +180,12 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
     try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
+        if message.is_from_me:
+            sender_name = "Me"
+        elif sender_names and message.sender in sender_names:
+            sender_name = sender_names[message.sender]
+        else:
+            sender_name = get_sender_name(message.sender)
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
@@ -172,8 +197,11 @@ def format_messages_list(messages: List[Message], show_chat_info: bool = True) -
         output += "No messages to display."
         return output
     
+    # Batch-resolve all sender names up front to avoid N+1 queries
+    sender_names = _batch_resolve_sender_names(messages)
+    
     for message in messages:
-        output += format_message(message, show_chat_info)
+        output += format_message(message, show_chat_info, sender_names=sender_names)
     return output
 
 def list_messages(
@@ -190,7 +218,7 @@ def list_messages(
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         # Build base query
@@ -273,9 +301,6 @@ def list_messages(
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def get_message_context(
@@ -285,7 +310,7 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         # Get the target message first
@@ -366,9 +391,6 @@ def get_message_context(
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         raise
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def list_chats(
@@ -380,7 +402,7 @@ def list_chats(
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         # Build base query
@@ -440,15 +462,12 @@ def list_chats(
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         # Split query into characters to support partial matching
@@ -482,9 +501,6 @@ def search_contacts(query: str) -> List[Contact]:
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
@@ -496,7 +512,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -533,15 +549,12 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -582,15 +595,12 @@ def get_last_interaction(jid: str) -> str:
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         query = """
@@ -630,15 +640,12 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = _get_db()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -673,9 +680,6 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
 def send_message(recipient: str, message: str, reply_to: Optional[str] = None, reply_to_sender: Optional[str] = None) -> Tuple[bool, str]:
     try:
