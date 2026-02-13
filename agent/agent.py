@@ -112,7 +112,7 @@ def _load_instructions():
 _BASE_INSTRUCTION_TEMPLATE, _PRIVILEDGED_INSTRUCTIONS, _COMMON_RULES = _load_instructions()
 
 def format_leo_response(text: str) -> str:
-    return f"Leo: {text}" if not IS_DEDICATED_NUMBER else text
+    return f"_*(Leo)*_ {text}" if not IS_DEDICATED_NUMBER else text
 
 class AgentFactory:
     """Factory for creating and caching Agent instances with LRU eviction and TTL."""
