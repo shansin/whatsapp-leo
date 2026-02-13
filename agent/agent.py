@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Unix domain socket server for receiving WhatsApp messages from Go bridge."""
 
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, asdict
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import json
+import time
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 import os
 import sys
 import asyncio
 import logging
+from dateutil import parser as dateutil_parser
 from pydantic import BaseModel
 from agents import Agent, Runner, trace, OpenAIChatCompletionsModel, SQLiteSession
 from agents.mcp import MCPServerStdio
@@ -33,8 +36,6 @@ logger = logging.getLogger("AgentServer")
 
 load_dotenv(override=True)
 
-IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true"
-
 # Get instance GUID for multi-instance support
 INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
 
@@ -52,6 +53,64 @@ IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true
 # MCP Server Paths
 WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shsin/git_linux/workspace/workspace-server/dist/index.js")
 
+# ── Cached singletons (avoid re-creation per message) ───────────────────────
+_openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+_cached_model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=_openai_client)
+
+# Shared env copy (avoids copying 100+ vars per message)
+_shared_env = os.environ.copy()
+_shared_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"
+
+# Pre-built static MCP param dicts
+_workspace_mcp_params = {
+    "command": "node",
+    "args": [WORKSPACE_MCP_PATH, "--use-dot-names"],
+    "env": _shared_env,
+}
+_brave_mcp_params = {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "env": _shared_env,
+}
+_garmin_mcp_params = {
+    "command": "uvx",
+    "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
+}
+
+# ── Pre-built instruction fragments (loaded from instructions.txt) ──────────
+def _load_instructions():
+    instr_path = os.path.join(os.path.dirname(__file__), "instructions.txt")
+    if not os.path.exists(instr_path):
+        logger.warning(f"instructions.txt not found at {instr_path}")
+        return "", "", ""
+    
+    with open(instr_path, "r") as f:
+        content = f.read()
+    
+    sections = {}
+    current_section = None
+    lines = []
+    
+    for line in content.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            if current_section:
+                sections[current_section] = "\n".join(lines).strip()
+            current_section = line[1:-1]
+            lines = []
+        else:
+            lines.append(line)
+    
+    if current_section:
+        sections[current_section] = "\n".join(lines).strip()
+    
+    return (
+        sections.get("BASE_INSTRUCTIONS", "") + "\n",
+        "\n" + sections.get("PRIVILEDGED_INSTRUCTIONS", "") + "\n",
+        "\n" + sections.get("COMMON_RULES", "")
+    )
+
+_BASE_INSTRUCTION_TEMPLATE, _PRIVILEDGED_INSTRUCTIONS, _COMMON_RULES = _load_instructions()
+
 def format_leo_response(text: str) -> str:
     return f"Leo: {text}" if not IS_DEDICATED_NUMBER else text
 
@@ -64,12 +123,10 @@ class AgentFactory:
     
     def _is_expired(self, last_used: float) -> bool:
         """Check if an entry has exceeded the TTL."""
-        import time
         return (time.time() - last_used) > TTL_SECONDS
     
     async def get_agent(self, chat_jid: str, mcp_servers: List[MCPServerStdio], model, instructions: str) -> Tuple[Agent, SQLiteSession]:
         """Get or create an Agent for the given chat_jid."""
-        import time
         current_time = time.time()
         
         if chat_jid in self._agents:
@@ -123,13 +180,8 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     Returns (remind_at_datetime, reminder_message_text).
     Raises ValueError if parsing fails.
     """
-    from dateutil import parser as dateutil_parser
-
     now = datetime.now(TZ)
     current_time = now.strftime("%I:%M %p %Z, %A %B %d, %Y")
-
-    client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
-    model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=client)
 
     agent = Agent(
         name="ReminderParser",
@@ -146,7 +198,7 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
             "   - 'tomorrow at 9am' → '9:00 AM Feb 13, 2026'\n"
             "Always include the full date and time. Use 12-hour format with AM/PM.\n"
         ),
-        model=model,
+        model=_cached_model,
         output_type=ReminderParsed,
     )
 
@@ -249,112 +301,38 @@ async def process_message(data: dict):
         is_allowed = message.phone_number in ALLOWED_SENDERS
         
         try:
-            client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
-            model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=client)
-            
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
-            from contextlib import AsyncExitStack
-        
-            now = datetime.now(ZoneInfo("America/Los_Angeles"))
+            now = datetime.now(TZ)
             current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
             
-            # Base instructions for everyone
-            base_instruction = f"""Date and time right now is {current_time}. 
-        
-            You are a powerful assistant called Leo. Respond helpfully to the user's message.
-            
-            You can help with:
-            - **General topics and queries**: from your knowledge base
-            - **Web search**: using brave search
-            """
-            
-            # Workspace instructions only for allowed users
-            workspace_instruction = """
-            - **Google Docs**: Create, read, find, update (append/replace/insert), and move documents.
-            - **Google Drive**: Find/create folders, search for files, and download files.
-            - **Google Calendar**: List calendars, view events, create/update/delete events, respond to invites, and find free time.
-            - **Google Sheets**: Read content, get ranges, find spreadsheets, and get metadata.
-            - **Google Slides**: Read text, find presentations, and get metadata.
-            - **Gmail**: Search threads, draft/send emails, manage labels.
-            - **Garmin Connect**: Access fitness and health data from Garmin devices.
-            """
-            
-            common_rules = f"""
-            **Important Rules:**
-            1. **User Interaction**:
-               - Respond directly with your answer. Your response will be sent to the user automatically on chat.
-               - Use emojis to make responses more engaging.
-               - Do not ask followup questions. Just answer and finish.
-            2. **Safety**: 
-               - Always PREVIEW write operations (creating events, sending emails, editing docs) before executing them. 
-               - Ask for explicit user confirmation for destructive actions.
-            3. **Formatting**: Use WhatsApp-compatible formatting in your responses:
-                To italicize your message, place an underscore on both sides of the text:
-                _text_
-                To bold your message, place an asterisk on both sides of the text:
-                *text*
-                To strikethrough your message, place a tilde on both sides of the text:
-                ~text~
-                To monospace your message, place three backticks on both sides of the text:
-                ```text```
-                To add a bulleted list to your message, place an asterisk or hyphen and a space before each word or sentence:
-                * text
-                * text
-                Or
-                - text
-                - text
-                To add a numbered list to your message, place a number, period, and space before each line of text:
-                1. text
-                2. text
-                To add a quote to your message, place an angle bracket and space before the text:
-                > text
-                To add inline code to your message, place a backtick on both sides of the message:
-                `text`
-                Tables are not supported in WhatsApp, so do not use them.
-            4. **Be concise, helpful, and professional.**
-            """
+            # Build instructions with timestamp interpolation only
+            base_instruction = _BASE_INSTRUCTION_TEMPLATE.format(current_time=current_time)
 
             # Compose final instructions based on permission
             if is_allowed:
-                Instruction = base_instruction + workspace_instruction + common_rules
+                Instruction = base_instruction + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
             else:
-                Instruction = base_instruction + common_rules
+                Instruction = base_instruction + _COMMON_RULES
 
-            # MCP Server Configuration
-            workspace_mcp_server_params = {
-                "command": "node",
-                "args": [WORKSPACE_MCP_PATH, "--use-dot-names"],
-            }
-
-            workspace_env = os.environ.copy()
-            workspace_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"
-            workspace_mcp_server_params["env"] = workspace_env
-
-
-            brave_env = os.environ.copy()
-            brave_params = {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": brave_env}
-
-            garmin_mcp_server_params = {"command": "uvx", "args": ["git+https://github.com/Taxuspt/garmin_mcp"]}
+            # MCP servers use pre-built param dicts from module level
             
             async with AsyncExitStack() as stack:
                 # Start Brave MCP server (WhatsApp is handled via direct function calls)
-                brave_mcp_server = await stack.enter_async_context(MCPServerStdio(params=brave_params, client_session_timeout_seconds=30))
+                brave_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_brave_mcp_params, client_session_timeout_seconds=30))
                 
                 mcp_servers = [brave_mcp_server]
                 
                 # Conditionally start privileged MCPs
                 if is_allowed:
-                    workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=workspace_mcp_server_params, client_session_timeout_seconds=300))
+                    workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_workspace_mcp_params, client_session_timeout_seconds=300))
                     mcp_servers.append(workspace_mcp_server)
 
-                    garmin_mcp_server = await stack.enter_async_context(MCPServerStdio(params=garmin_mcp_server_params, client_session_timeout_seconds=120))
+                    garmin_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_garmin_mcp_params, client_session_timeout_seconds=120))
                     mcp_servers.append(garmin_mcp_server)
 
                 agent, session = await agent_factory.get_agent(
                     chat_jid=message.chat_jid,
                     mcp_servers=mcp_servers,
-                    model=model,
+                    model=_cached_model,
                     instructions=Instruction
                 )
 
