@@ -280,6 +280,9 @@ async def process_message(data: dict):
             logger.error(f"Error handling #remindme: {e}", exc_info=True)
             whatsapp_send_message(message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
             return
+    
+    if "#remindme" in message.content.lower():
+        return
 
     should_leo_respond = False
 
