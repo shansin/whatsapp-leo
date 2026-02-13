@@ -258,11 +258,8 @@ async def process_message(data: dict):
 
     is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
 
-    # ── Handle #remindme (allowed senders only) ──────────────────────────
-    if "#remindme" in message.content.lower() and message.phone_number in ALLOWED_SENDERS:
-        if not IS_DEDICATED_NUMBER and not is_leo_mentioned:
-            return
-
+    # ── Handle #remindme ─────────────────────────
+    if (not IS_DEDICATED_NUMBER) and ("#remindme" in message.content.lower()) and (message.phone_number in ALLOWED_SENDERS):
         try:
             remind_at, original_msg = await parse_remindme_with_agent(message.content)
             validate_reminder_time(remind_at)
