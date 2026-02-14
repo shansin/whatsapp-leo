@@ -85,6 +85,16 @@ func NewMessageStore() (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+
+		-- Performance indexes for frequently queried columns
+		CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp 
+			ON messages(chat_jid, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS idx_messages_sender 
+			ON messages(sender);
+		CREATE INDEX IF NOT EXISTS idx_messages_content 
+			ON messages(content COLLATE NOCASE);
+		CREATE INDEX IF NOT EXISTS idx_chats_last_message_time 
+			ON chats(last_message_time DESC);
 	`)
 	if err != nil {
 		db.Close()
@@ -914,7 +924,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		server := &http.Server{Handler: mux}
+		server := &http.Server{
+			Handler:      mux,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  120 * time.Second,
+		}
 		if err := server.Serve(listener); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}

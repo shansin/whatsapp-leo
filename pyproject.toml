@@ -64,6 +64,7 @@ dependencies = [
     "multiprocess==0.70.18",
     "networkx==3.6.1",
     "numpy==2.4.0",
+    "orjson>=3.10.0",
     "nvidia-cublas-cu12==12.8.4.1 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
     "nvidia-cuda-cupti-cu12==12.8.90 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
     "nvidia-cuda-nvrtc-cu12==12.8.93 ; platform_machine == 'x86_64' and sys_platform == 'linux'",

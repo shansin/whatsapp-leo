@@ -16,11 +16,14 @@ load_dotenv(override=True)
 _db_migrated = False
 
 TZ = ZoneInfo("America/Los_Angeles")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "store", "reminders.db")
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "store", "reminders.db"
+)
 POLL_INTERVAL = int(os.getenv("REMINDER_POLL_INTERVAL", "60"))
 
 
 # ── Validation ───────────────────────────────────────────────────────────────
+
 
 def validate_reminder_time(dt: datetime) -> None:
     """Raise ValueError if the reminder time is in the past."""
@@ -30,6 +33,7 @@ def validate_reminder_time(dt: datetime) -> None:
 
 
 # ── Persistence ──────────────────────────────────────────────────────────────
+
 
 def _get_db() -> sqlite3.Connection:
     """Return a connection, running schema migration only on first call."""
@@ -56,16 +60,35 @@ def _get_db() -> sqlite3.Connection:
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # Performance indexes for efficient reminder queries
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reminders_fired_remind_at 
+            ON reminders(fired, remind_at)
+        """)
+        conn.commit()
         _db_migrated = True
     return conn
 
 
-def store_reminder(chat_jid: str, message: str, remind_at: datetime, message_id: str = "", sender_jid: str = "") -> int:
+def store_reminder(
+    chat_jid: str,
+    message: str,
+    remind_at: datetime,
+    message_id: str = "",
+    sender_jid: str = "",
+) -> int:
     """Insert a new reminder. Returns its row id."""
     conn = _get_db()
     cur = conn.execute(
         "INSERT INTO reminders (chat_jid, message, remind_at, created_at, message_id, sender_jid) VALUES (?, ?, ?, ?, ?, ?)",
-        (chat_jid, message, remind_at.isoformat(), datetime.now(TZ).isoformat(), message_id, sender_jid),
+        (
+            chat_jid,
+            message,
+            remind_at.isoformat(),
+            datetime.now(TZ).isoformat(),
+            message_id,
+            sender_jid,
+        ),
     )
     conn.commit()
     row_id = cur.lastrowid
@@ -93,6 +116,7 @@ def mark_fired(reminder_id: int) -> None:
 
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
+
 
 class ReminderScheduler:
     """Async background loop that fires due reminders."""
@@ -122,12 +146,15 @@ class ReminderScheduler:
                 for rid, chat_jid, message, remind_at, message_id, sender_jid in rows:
                     text = f"⏰ *Reminder*\n\n{message}"
                     success, result = self._send_fn(
-                        chat_jid, text,
+                        chat_jid,
+                        text,
                         reply_to=message_id or None,
                         reply_to_sender=sender_jid or None,
                     )
                     if success:
-                        conn.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (rid,))
+                        conn.execute(
+                            "UPDATE reminders SET fired = 1 WHERE id = ?", (rid,)
+                        )
                         conn.commit()
                         logger.info(f"Fired reminder {rid} to {chat_jid}")
                     else:

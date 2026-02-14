@@ -6,7 +6,7 @@ from dataclasses import dataclass, asdict
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import json
+import orjson
 import time
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -21,7 +21,12 @@ from agents.mcp import MCPServerStdio
 from typing import Dict, List, Tuple
 
 # Add whatsapp-mcp-server to path for direct imports
-WHATSAPP_MCP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-mcp', 'whatsapp-mcp-server')
+WHATSAPP_MCP_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "whatsapp-mcp",
+    "whatsapp-mcp-server",
+)
 sys.path.insert(0, WHATSAPP_MCP_DIR)
 from whatsapp import send_message as whatsapp_send_message
 from reminder import validate_reminder_time, store_reminder, ReminderScheduler
@@ -29,8 +34,8 @@ from reminder import validate_reminder_time, store_reminder, ReminderScheduler
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("AgentServer")
 
@@ -46,16 +51,26 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
-ALLOWED_SENDERS = [s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()]
+ALLOWED_SENDERS = [
+    s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()
+]
 LEO_MENTION_ID = os.getenv("LEO_MENTION_ID", "@23833461416078")
 IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true"
 
+# Maximum message size to prevent memory exhaustion (10MB)
+MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "10485760"))
+
 # MCP Server Paths
-WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH", "/home/shsin/git_linux/workspace/workspace-server/dist/index.js")
+WORKSPACE_MCP_PATH = os.getenv(
+    "WORKSPACE_MCP_PATH",
+    "/home/shsin/git_linux/workspace/workspace-server/dist/index.js",
+)
 
 # ── Cached singletons (avoid re-creation per message) ───────────────────────
 _openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
-_cached_model = OpenAIChatCompletionsModel(model=MODEL_NAME, openai_client=_openai_client)
+_cached_model = OpenAIChatCompletionsModel(
+    model=MODEL_NAME, openai_client=_openai_client
+)
 
 # Shared env copy (avoids copying 100+ vars per message)
 _shared_env = os.environ.copy()
@@ -77,20 +92,21 @@ _garmin_mcp_params = {
     "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
 }
 
+
 # ── Pre-built instruction fragments (loaded from instructions.txt) ──────────
 def _load_instructions():
     instr_path = os.path.join(os.path.dirname(__file__), "instructions.txt")
     if not os.path.exists(instr_path):
         logger.warning(f"instructions.txt not found at {instr_path}")
         return "", "", ""
-    
+
     with open(instr_path, "r") as f:
         content = f.read()
-    
+
     sections = {}
     current_section = None
     lines = []
-    
+
     for line in content.splitlines():
         if line.startswith("[") and line.endswith("]"):
             if current_section:
@@ -99,10 +115,10 @@ def _load_instructions():
             lines = []
         else:
             lines.append(line)
-    
+
     if current_section:
         sections[current_section] = "\n".join(lines).strip()
-    
+
     return (
         sections.get("BASE_INSTRUCTIONS", "") + "\n",
         "\n" + sections.get("PRIVILEDGED_INSTRUCTIONS", "") + "\n",
@@ -110,33 +126,47 @@ def _load_instructions():
         sections.get("REMINDER_INSTRUCTIONS", ""),
     )
 
-_BASE_INSTRUCTION_TEMPLATE, _PRIVILEDGED_INSTRUCTIONS, _COMMON_RULES, _REMINDER_INSTRUCTIONS_TEMPLATE = _load_instructions()
+
+(
+    _BASE_INSTRUCTION_TEMPLATE,
+    _PRIVILEDGED_INSTRUCTIONS,
+    _COMMON_RULES,
+    _REMINDER_INSTRUCTIONS_TEMPLATE,
+) = _load_instructions()
 
 # Pre-built instruction templates (only {current_time} needs filling at message time)
-_INSTRUCTIONS_PRIVILEGED_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
+_INSTRUCTIONS_PRIVILEGED_TEMPLATE = (
+    _BASE_INSTRUCTION_TEMPLATE + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
+)
 _INSTRUCTIONS_BASIC_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _COMMON_RULES
+
 
 def format_leo_response(text: str) -> str:
     return f"_*(Leo)*_ {text}" if not IS_DEDICATED_NUMBER else text
+
 
 class AgentFactory:
     """Factory for creating and caching Agent instances with LRU eviction and TTL."""
 
     def __init__(self):
         # OrderedDict to maintain LRU order: most recently used at the end
-        self._agents: OrderedDict[str, Tuple[Agent, List[MCPServerStdio], SQLiteSession, float]] = OrderedDict()
-    
+        self._agents: OrderedDict[
+            str, Tuple[Agent, List[MCPServerStdio], SQLiteSession, float]
+        ] = OrderedDict()
+
     def _is_expired(self, last_used: float) -> bool:
         """Check if an entry has exceeded the TTL."""
         return (time.time() - last_used) > TTL_SECONDS
-    
-    async def get_agent(self, chat_jid: str, mcp_servers: List[MCPServerStdio], model, instructions: str) -> Tuple[Agent, SQLiteSession]:
+
+    async def get_agent(
+        self, chat_jid: str, mcp_servers: List[MCPServerStdio], model, instructions: str
+    ) -> Tuple[Agent, SQLiteSession]:
         """Get or create an Agent for the given chat_jid."""
         current_time = time.time()
-        
+
         if chat_jid in self._agents:
             agent, _, session, last_used = self._agents[chat_jid]
-            
+
             # Check if expired (TTL exceeded)
             if self._is_expired(last_used):
                 del self._agents[chat_jid]
@@ -146,25 +176,25 @@ class AgentFactory:
                 self._agents.move_to_end(chat_jid)
                 agent.mcp_servers = mcp_servers
                 self._agents[chat_jid] = (agent, mcp_servers, session, current_time)
-                logger.info(f"Reusing agent for {chat_jid} (cache: {len(self._agents)})")
+                logger.info(
+                    f"Reusing agent for {chat_jid} (cache: {len(self._agents)})"
+                )
                 return agent, session
-        
+
         # Evict least recently used if at capacity
         if len(self._agents) >= MAX_AGENTS:
             oldest_jid, _ = self._agents.popitem(last=False)
             logger.info(f"Evicting LRU agent for {oldest_jid}")
-        
+
         # Create new agent and session
         agent = Agent(
-            name="Leo",
-            instructions=instructions,
-            mcp_servers=mcp_servers,
-            model=model
+            name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model
         )
         session = SQLiteSession(chat_jid)
         self._agents[chat_jid] = (agent, mcp_servers, session, current_time)
         logger.info(f"Created new agent for {chat_jid} (cache: {len(self._agents)})")
         return agent, session
+
 
 # Global agent factory instance
 agent_factory = AgentFactory()
@@ -173,6 +203,7 @@ TZ = ZoneInfo("America/Los_Angeles")
 
 
 # ── Structured output model for reminder parsing ────────────────────────────
+
 
 class ReminderParsed(BaseModel):
     reminder_message: str
@@ -187,6 +218,7 @@ _reminder_parser_agent = Agent(
     output_type=ReminderParsed,
 )
 
+
 async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     """Use an OpenAI agent to parse a #remindme message into (remind_at, message).
 
@@ -196,7 +228,9 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     now = datetime.now(TZ)
     current_time = now.strftime("%I:%M %p %Z, %A %B %d, %Y")
 
-    _reminder_parser_agent.instructions = _REMINDER_INSTRUCTIONS_TEMPLATE.format(current_time=current_time)
+    _reminder_parser_agent.instructions = _REMINDER_INSTRUCTIONS_TEMPLATE.format(
+        current_time=current_time
+    )
 
     result = await Runner.run(_reminder_parser_agent, content)
     parsed: ReminderParsed = result.final_output
@@ -212,9 +246,11 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
 
     return (remind_at, parsed.reminder_message)
 
+
 @dataclass
 class ReceivedMessage:
     """Data structure for incoming WhatsApp messages."""
+
     chat_jid: str
     chat_name: str
     content: str
@@ -247,20 +283,33 @@ class ReceivedMessage:
             url=data.get("url", ""),
         )
 
+
 async def process_message(data: dict):
     """Process a single message asynchronously."""
     if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("Full message payload: %s", json.dumps(data, indent=2))
+        logger.debug("Full message payload: %s", orjson.dumps(data).decode())
     message = ReceivedMessage.from_dict(data)
 
-    is_leo_mentioned = "#leo" in message.content.lower() or "@leo" in message.content.lower()
+    is_leo_mentioned = (
+        "#leo" in message.content.lower() or "@leo" in message.content.lower()
+    )
 
     # ── Handle #remindme ─────────────────────────
-    if (not IS_DEDICATED_NUMBER) and ("#remindme" in message.content.lower()) and (message.phone_number in ALLOWED_SENDERS):
+    if (
+        (not IS_DEDICATED_NUMBER)
+        and ("#remindme" in message.content.lower())
+        and (message.phone_number in ALLOWED_SENDERS)
+    ):
         try:
             remind_at, original_msg = await parse_remindme_with_agent(message.content)
             validate_reminder_time(remind_at)
-            store_reminder(message.chat_jid, original_msg, remind_at, message_id=message.id, sender_jid=message.sender_jid)
+            store_reminder(
+                message.chat_jid,
+                original_msg,
+                remind_at,
+                message_id=message.id,
+                sender_jid=message.sender_jid,
+            )
             confirm_time = remind_at.strftime("%b %d, %I:%M %p %Z")
             await asyncio.to_thread(
                 whatsapp_send_message,
@@ -272,80 +321,119 @@ async def process_message(data: dict):
             logger.info(f"Reminder set for {confirm_time} in {message.chat_jid}")
             return
         except ValueError as e:
-            await asyncio.to_thread(whatsapp_send_message, message.chat_jid, f"❌ {e}", reply_to=message.id, reply_to_sender=message.sender_jid)
+            await asyncio.to_thread(
+                whatsapp_send_message,
+                message.chat_jid,
+                f"❌ {e}",
+                reply_to=message.id,
+                reply_to_sender=message.sender_jid,
+            )
             return
         except Exception as e:
             logger.error(f"Error handling #remindme: {e}", exc_info=True)
-            await asyncio.to_thread(whatsapp_send_message, message.chat_jid, "❌ Something went wrong setting the reminder.", reply_to=message.id, reply_to_sender=message.sender_jid)
+            await asyncio.to_thread(
+                whatsapp_send_message,
+                message.chat_jid,
+                "❌ Something went wrong setting the reminder.",
+                reply_to=message.id,
+                reply_to_sender=message.sender_jid,
+            )
             return
-    
+
     if "#remindme" in message.content.lower():
         return
 
     should_leo_respond = False
 
-    if(IS_DEDICATED_NUMBER):
+    if IS_DEDICATED_NUMBER:
         # Respond if: DM (ends with @lid) OR group mention (@g in jid AND @23833461416078 in content)
         is_dm = message.chat_jid.endswith("@lid")
-        is_group_mention = "@g" in message.chat_jid and LEO_MENTION_ID in message.content
+        is_group_mention = (
+            "@g" in message.chat_jid and LEO_MENTION_ID in message.content
+        )
         should_leo_respond = is_dm or is_group_mention
     else:
         should_leo_respond = is_leo_mentioned
-    
+
     if should_leo_respond:
         logger.info(f"Leo mentioned by {message.sender}! Processing...")
-        
+
         # Check if sender is allowed to use privileged feature
         is_allowed = message.phone_number in ALLOWED_SENDERS
-        
+
         try:
             now = datetime.now(TZ)
             current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
-            
+
             # Use pre-built template — only interpolate the timestamp
-            template = _INSTRUCTIONS_PRIVILEGED_TEMPLATE if is_allowed else _INSTRUCTIONS_BASIC_TEMPLATE
+            template = (
+                _INSTRUCTIONS_PRIVILEGED_TEMPLATE
+                if is_allowed
+                else _INSTRUCTIONS_BASIC_TEMPLATE
+            )
             Instruction = template.format(current_time=current_time)
 
             # MCP servers use pre-built param dicts from module level
-            
+
             async with AsyncExitStack() as stack:
                 # Start Brave MCP server (WhatsApp is handled via direct function calls)
-                brave_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_brave_mcp_params, client_session_timeout_seconds=30))
-                
+                brave_mcp_server = await stack.enter_async_context(
+                    MCPServerStdio(
+                        params=_brave_mcp_params, client_session_timeout_seconds=30
+                    )
+                )
+
                 mcp_servers = [brave_mcp_server]
-                
+
                 # Conditionally start privileged MCPs
                 if is_allowed:
-                    workspace_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_workspace_mcp_params, client_session_timeout_seconds=300))
+                    workspace_mcp_server = await stack.enter_async_context(
+                        MCPServerStdio(
+                            params=_workspace_mcp_params,
+                            client_session_timeout_seconds=300,
+                        )
+                    )
                     mcp_servers.append(workspace_mcp_server)
 
-                    garmin_mcp_server = await stack.enter_async_context(MCPServerStdio(params=_garmin_mcp_params, client_session_timeout_seconds=120))
+                    garmin_mcp_server = await stack.enter_async_context(
+                        MCPServerStdio(
+                            params=_garmin_mcp_params,
+                            client_session_timeout_seconds=120,
+                        )
+                    )
                     mcp_servers.append(garmin_mcp_server)
 
                 agent, session = await agent_factory.get_agent(
                     chat_jid=message.chat_jid,
                     mcp_servers=mcp_servers,
                     model=_cached_model,
-                    instructions=Instruction
+                    instructions=Instruction,
                 )
 
                 with trace("LeoWhatsappAssistant"):
-                    result = await Runner.run(agent, json.dumps(asdict(message)), session=session)
+                    result = await Runner.run(
+                        agent, orjson.dumps(asdict(message)).decode(), session=session
+                    )
 
                 logger.info(f"Agent execution completed. Result: {result.final_output}")
-                
+
                 # Send the agent's response directly via WhatsApp
                 if result.final_output:
                     success, send_result = await asyncio.to_thread(
-                        whatsapp_send_message, message.chat_jid, format_leo_response(result.final_output)
+                        whatsapp_send_message,
+                        message.chat_jid,
+                        format_leo_response(result.final_output),
                     )
                     if success:
                         logger.info(f"Message sent successfully to {message.chat_jid}")
                     else:
-                        logger.error(f"Failed to send message to {message.chat_jid}: {send_result}")
+                        logger.error(
+                            f"Failed to send message to {message.chat_jid}: {send_result}"
+                        )
 
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
+
 
 async def handle_client(reader, writer):
     """Handle a single client connection."""
@@ -357,24 +445,31 @@ async def handle_client(reader, writer):
             if not chunk:
                 break
             chunks.extend(chunk)
+            # Check message size limit
+            if len(chunks) > MAX_MESSAGE_SIZE:
+                logger.error(
+                    "Message too large (%d bytes), dropping connection", len(chunks)
+                )
+                writer.write(orjson.dumps({"error": "Message too large"}))
+                await writer.drain()
+                return
             try:
-                message_data = json.loads(chunks)
+                message_data = orjson.loads(chunks)
                 break
-            except json.JSONDecodeError:
+            except orjson.JSONDecodeError:
                 continue
-        
+
         if not chunks:
             return
 
         if message_data is not None:
             # Process immediately in background task
             asyncio.create_task(process_message(message_data))
-            
-            response = json.dumps({
-                "status": "processing",
-                "message": "Message received"
-            })
-            writer.write(response.encode())
+
+            response = orjson.dumps(
+                {"status": "processing", "message": "Message received"}
+            )
+            writer.write(response)
             await writer.drain()
         else:
             writer.write(b'{"error": "Invalid JSON"}')
@@ -394,22 +489,24 @@ async def handle_client(reader, writer):
         except Exception as e:
             logger.warning(f"Error closing writer: {e}")
 
+
 async def main():
     """Start the Unix domain socket server."""
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
-    
+
     # Start the reminder scheduler in the background
     scheduler = ReminderScheduler(send_fn=whatsapp_send_message)
     asyncio.create_task(scheduler.run())
-    
+
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o666)
-    
+
     logger.info(f"Unix domain socket Agent Server running at {SOCKET_PATH}")
-    
+
     async with server:
         await server.serve_forever()
+
 
 if __name__ == "__main__":
     try:
