@@ -470,7 +470,7 @@ async def process_message(data: dict):
 
     # ── Handle #remindme ─────────────────────────
     if (
-        (not IS_DEDICATED_NUMBER)
+        IS_DEDICATED_NUMBER
         and ("#remindme" in message.content.lower())
         and (message.phone_number in ALLOWED_SENDERS)
     ):
@@ -501,7 +501,8 @@ async def process_message(data: dict):
 
     # ── Handle #briefing commands ─────────────────────────
     if (
-        "#briefing" in message.content.lower()
+        IS_DEDICATED_NUMBER
+        and "#briefing" in message.content.lower()
         and message.phone_number in ALLOWED_SENDERS
     ):
         await handle_briefing_command(message)
