@@ -92,7 +92,6 @@ def store_reminder(
     )
     conn.commit()
     row_id = cur.lastrowid
-    conn.close()
     return row_id
 
 
@@ -104,7 +103,6 @@ def get_due_reminders() -> list:
         "SELECT id, chat_jid, message, remind_at, message_id, sender_jid FROM reminders WHERE fired = 0 AND remind_at <= ?",
         (now_iso,),
     ).fetchall()
-    conn.close()
     return rows
 
 
@@ -112,7 +110,6 @@ def mark_fired(reminder_id: int) -> None:
     conn = _get_db()
     conn.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (reminder_id,))
     conn.commit()
-    conn.close()
 
 
 # ── Scheduler ────────────────────────────────────────────────────────────────

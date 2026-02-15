@@ -7,6 +7,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import orjson
+import re
 import time
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -18,7 +19,6 @@ from dateutil import parser as dateutil_parser
 from pydantic import BaseModel
 from agents import Agent, Runner, trace, OpenAIChatCompletionsModel, SQLiteSession
 from agents.mcp import MCPServerStdio
-from typing import Dict, List, Tuple
 
 # Add whatsapp-mcp-server to path for direct imports
 WHATSAPP_MCP_DIR = os.path.join(
@@ -30,6 +30,15 @@ WHATSAPP_MCP_DIR = os.path.join(
 sys.path.insert(0, WHATSAPP_MCP_DIR)
 from whatsapp import send_message as whatsapp_send_message
 from reminder import validate_reminder_time, store_reminder, ReminderScheduler
+from briefing import (
+    BriefingScheduler,
+    add_briefing,
+    list_briefings,
+    remove_briefing,
+    remove_all_briefings,
+    parse_schedule_to_cron,
+    get_next_run_from_cron,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -145,13 +154,24 @@ def format_leo_response(text: str) -> str:
     return f"_*(Leo)*_ {text}" if not IS_DEDICATED_NUMBER else text
 
 
+async def _reply(message: "ReceivedMessage", text: str) -> None:
+    """Send a WhatsApp reply to the originating message (non-blocking)."""
+    await asyncio.to_thread(
+        whatsapp_send_message,
+        message.chat_jid,
+        text,
+        reply_to=message.id,
+        reply_to_sender=message.sender_jid,
+    )
+
+
 class AgentFactory:
     """Factory for creating and caching Agent instances with LRU eviction and TTL."""
 
     def __init__(self):
         # OrderedDict to maintain LRU order: most recently used at the end
         self._agents: OrderedDict[
-            str, Tuple[Agent, List[MCPServerStdio], SQLiteSession, float]
+            str, tuple[Agent, list[MCPServerStdio], SQLiteSession, float]
         ] = OrderedDict()
 
     def _is_expired(self, last_used: float) -> bool:
@@ -159,8 +179,8 @@ class AgentFactory:
         return (time.time() - last_used) > TTL_SECONDS
 
     async def get_agent(
-        self, chat_jid: str, mcp_servers: List[MCPServerStdio], model, instructions: str
-    ) -> Tuple[Agent, SQLiteSession]:
+        self, chat_jid: str, mcp_servers: list[MCPServerStdio], model, instructions: str
+    ) -> tuple[Agent, SQLiteSession]:
         """Get or create an Agent for the given chat_jid."""
         current_time = time.time()
 
@@ -284,6 +304,160 @@ class ReceivedMessage:
         )
 
 
+async def handle_briefing_command(message: ReceivedMessage):
+    """Handle #briefing commands for managing briefings."""
+    content = message.content.strip()
+    parts = content.split(maxsplit=2)
+
+    if len(parts) < 2:
+        await send_briefing_help(message)
+        return
+
+    subcommand = parts[1].lower()
+
+    try:
+        if subcommand == "add":
+            # Format: #briefing add <name> <schedule> <prompt>
+            # Example: #briefing add "Morning Brief" "9am everyday" "Get my sleep data and calendar events"
+            await handle_briefing_add(message, parts)
+        elif subcommand == "list":
+            await handle_briefing_list(message)
+        elif subcommand == "remove":
+            # Format: #briefing remove <id>
+            await handle_briefing_remove(message, parts)
+        elif subcommand == "remove-all":
+            await handle_briefing_remove_all(message)
+        elif subcommand == "help":
+            await send_briefing_help(message)
+        else:
+            await _reply(message, f"❌ Unknown briefing command: {subcommand}\n\nUse #briefing help for usage.")
+    except Exception as e:
+        logger.error(f"Error handling briefing command: {e}", exc_info=True)
+        await _reply(message, f"❌ Error: {str(e)}")
+
+
+async def handle_briefing_add(message: ReceivedMessage, parts: list):
+    """Handle #briefing add command."""
+    content = message.content.strip()
+
+    # Extract quoted strings
+    quoted = re.findall(r'"([^"]*)"', content)
+
+    if len(quoted) < 2:
+        await _reply(
+            message,
+            '❌ Usage: #briefing add "Name" "Schedule" Prompt text...\n\nExample:\n#briefing add "Morning Brief" "9am everyday" Get my sleep data from Garmin and calendar events for today',
+        )
+        return
+
+    name = quoted[0]
+    schedule = quoted[1]
+
+    # Get prompt (everything after the second quoted string)
+    prompt_start = content.find(f'"{schedule}"') + len(f'"{schedule}"')
+    prompt = content[prompt_start:].strip()
+
+    if not prompt:
+        await _reply(message, "❌ Please provide a prompt for the briefing.")
+        return
+
+    try:
+        briefing_id, cron_expr = add_briefing(name, prompt, schedule, message.chat_jid)
+        next_run = get_next_run_from_cron(cron_expr)
+        next_run_str = next_run.strftime("%b %d, %I:%M %p %Z")
+
+        await _reply(
+            message,
+            f"📋 Briefing created!\n\n*Name:* {name}\n*Schedule:* {schedule}\n*Cron:* {cron_expr}\n*Next run:* {next_run_str}\n*ID:* {briefing_id}",
+        )
+        logger.info(f"Briefing '{name}' created with ID {briefing_id}")
+    except ValueError as e:
+        await _reply(message, f"❌ {e}")
+
+
+async def handle_briefing_list(message: ReceivedMessage):
+    """Handle #briefing list command."""
+    briefings = list_briefings()
+
+    if not briefings:
+        await _reply(message, "📋 No briefings configured.\n\nUse #briefing add to create one.")
+        return
+
+    lines = ["📋 *Configured Briefings:*\n"]
+    for b in briefings:
+        status = "✅" if b["enabled"] else "⏸️"
+        next_run = b["next_run_at"]
+        if next_run:
+            try:
+                next_dt = datetime.fromisoformat(next_run)
+                next_str = next_dt.strftime("%b %d, %I:%M %p")
+            except (ValueError, TypeError):
+                next_str = next_run
+        else:
+            next_str = "Not scheduled"
+        lines.append(f"{status} *ID {b['id']}:* {b['name']}")
+        lines.append(f"   Schedule: {b['schedule_cron']}")
+        lines.append(f"   Next: {next_str}\n")
+
+    await _reply(message, "\n".join(lines))
+
+
+async def handle_briefing_remove(message: ReceivedMessage, parts: list):
+    """Handle #briefing remove command."""
+    if len(parts) < 3:
+        await _reply(message, "❌ Usage: #briefing remove <id>")
+        return
+
+    try:
+        briefing_id = int(parts[2])
+        if remove_briefing(briefing_id):
+            await _reply(message, f"✅ Briefing {briefing_id} removed.")
+            logger.info(f"Briefing {briefing_id} removed")
+        else:
+            await _reply(message, f"❌ Briefing {briefing_id} not found.")
+    except ValueError:
+        await _reply(message, "❌ Please provide a valid briefing ID number.")
+
+
+async def handle_briefing_remove_all(message: ReceivedMessage):
+    """Handle #briefing remove-all command."""
+    count = remove_all_briefings()
+    await _reply(message, f"✅ Removed all briefings ({count} deleted).")
+    logger.info(f"All briefings removed ({count} deleted)")
+
+
+async def send_briefing_help(message: ReceivedMessage):
+    """Send briefing help message."""
+    help_text = """📋 *Briefing Commands*
+
+Create automated AI briefings that run on a schedule.
+
+*Commands:*
+• #briefing add "Name" "Schedule" Prompt
+  _Create a new briefing_
+  Example: #briefing add "Morning Brief" "9am everyday" Get my sleep and calendar
+
+• #briefing list
+  _Show all briefings_
+
+• #briefing remove <id>
+  _Remove a briefing by ID_
+
+• #briefing remove-all
+  _Remove all briefings_
+
+• #briefing help
+  _Show this help_
+
+*Schedule formats:*
+• "9am everyday" - Daily at 9 AM
+• "8am monday" - Mondays at 8 AM
+• "5pm friday" - Fridays at 5 PM
+• "every morning" - Daily at 9 AM
+"""
+    await _reply(message, help_text)
+
+
 async def process_message(data: dict):
     """Process a single message asynchronously."""
     if logger.isEnabledFor(logging.DEBUG):
@@ -311,36 +485,26 @@ async def process_message(data: dict):
                 sender_jid=message.sender_jid,
             )
             confirm_time = remind_at.strftime("%b %d, %I:%M %p %Z")
-            await asyncio.to_thread(
-                whatsapp_send_message,
-                message.chat_jid,
-                f"⏰ Reminder set for *{confirm_time}*!",
-                reply_to=message.id,
-                reply_to_sender=message.sender_jid,
-            )
+            await _reply(message, f"⏰ Reminder set for *{confirm_time}*!")
             logger.info(f"Reminder set for {confirm_time} in {message.chat_jid}")
             return
         except ValueError as e:
-            await asyncio.to_thread(
-                whatsapp_send_message,
-                message.chat_jid,
-                f"❌ {e}",
-                reply_to=message.id,
-                reply_to_sender=message.sender_jid,
-            )
+            await _reply(message, f"❌ {e}")
             return
         except Exception as e:
             logger.error(f"Error handling #remindme: {e}", exc_info=True)
-            await asyncio.to_thread(
-                whatsapp_send_message,
-                message.chat_jid,
-                "❌ Something went wrong setting the reminder.",
-                reply_to=message.id,
-                reply_to_sender=message.sender_jid,
-            )
+            await _reply(message, "❌ Something went wrong setting the reminder.")
             return
 
     if "#remindme" in message.content.lower():
+        return
+
+    # ── Handle #briefing commands ─────────────────────────
+    if (
+        "#briefing" in message.content.lower()
+        and message.phone_number in ALLOWED_SENDERS
+    ):
+        await handle_briefing_command(message)
         return
 
     should_leo_respond = False
@@ -371,7 +535,7 @@ async def process_message(data: dict):
                 if is_allowed
                 else _INSTRUCTIONS_BASIC_TEMPLATE
             )
-            Instruction = template.format(current_time=current_time)
+            instructions = template.format(current_time=current_time)
 
             # MCP servers use pre-built param dicts from module level
 
@@ -407,7 +571,7 @@ async def process_message(data: dict):
                     chat_jid=message.chat_jid,
                     mcp_servers=mcp_servers,
                     model=_cached_model,
-                    instructions=Instruction,
+                    instructions=instructions,
                 )
 
                 with trace("LeoWhatsappAssistant"):
@@ -490,6 +654,117 @@ async def handle_client(reader, writer):
             logger.warning(f"Error closing writer: {e}")
 
 
+async def execute_briefing_prompt(
+    prompt: str, chat_jid: str, briefing_name: str
+) -> str:
+    """
+    Execute a briefing prompt through the AI agent.
+
+    This function runs the briefing prompt through the full AI pipeline
+    with access to all privileged MCP servers (workspace, garmin, etc.).
+    Retries up to MAX_BRIEFING_RETRIES times on transient LLM errors (e.g.
+    malformed tool-call JSON causing 500s).
+    """
+    MAX_BRIEFING_RETRIES = 3
+
+    now = datetime.now(TZ)
+    current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
+
+    # Use privileged instructions for briefings (they run as system tasks)
+    # Add explicit briefing output instructions
+    briefing_output_rule = """
+**BRIEFING OUTPUT RULE**: This is an automated briefing. Return ONLY plain text formatted for WhatsApp. 
+NO JSON, NO XML, NO code blocks, NO raw API responses. Use emojis, bullet points (* ), bold (*text*), and clear formatting.
+If any tool call fails or returns an error, skip that section gracefully and continue with the rest of the briefing.
+
+**TOOL USAGE RULES FOR BRIEFINGS** (you MUST follow these):
+- Call tools ONE AT A TIME. Do NOT make parallel or batch tool calls.
+- Use ONLY the required parameters for each tool call. Do NOT include optional parameters unless absolutely necessary.
+- For calendar.listEvents: only pass calendarId, timeMin, and timeMax. Do NOT pass attendeeResponseStatus or any other optional parameters.
+- For calendar.createEvent: pass calendarId, summary, start, and end. Only add attendees if explicitly requested.
+- Keep tool call arguments as simple as possible. Prefer simple string values over complex nested objects.
+- If a tool call fails, do NOT retry it. Skip that data and move on to the next section.
+"""
+    instructions = (
+        _INSTRUCTIONS_PRIVILEGED_TEMPLATE.format(current_time=current_time)
+        + briefing_output_rule
+    )
+
+    last_error = None
+    for attempt in range(1, MAX_BRIEFING_RETRIES + 1):
+        try:
+            async with AsyncExitStack() as stack:
+                # Start all MCP servers
+                brave_mcp_server = await stack.enter_async_context(
+                    MCPServerStdio(
+                        params=_brave_mcp_params, client_session_timeout_seconds=30
+                    )
+                )
+                workspace_mcp_server = await stack.enter_async_context(
+                    MCPServerStdio(
+                        params=_workspace_mcp_params,
+                        client_session_timeout_seconds=300,
+                    )
+                )
+                garmin_mcp_server = await stack.enter_async_context(
+                    MCPServerStdio(
+                        params=_garmin_mcp_params,
+                        client_session_timeout_seconds=120,
+                    )
+                )
+
+                mcp_servers = [brave_mcp_server, workspace_mcp_server, garmin_mcp_server]
+
+                # Create a fresh agent for each attempt (avoids poisoned conversation state)
+                briefing_agent = Agent(
+                    name=f"LeoBriefing-{briefing_name}",
+                    instructions=instructions,
+                    mcp_servers=mcp_servers,
+                    model=_cached_model,
+                )
+
+                # Fresh session per attempt so retries don't replay the broken tool call
+                session = SQLiteSession(f"briefing:{briefing_name}:{attempt}")
+
+                with trace("LeoBriefing"):
+                    result = await Runner.run(briefing_agent, prompt, session=session)
+
+                # Extract the final output
+                if result.final_output is None:
+                    return "No briefing content generated."
+
+                output = result.final_output
+                if not isinstance(output, str):
+                    if hasattr(output, "model_dump"):
+                        output = str(output.model_dump())
+                    elif hasattr(output, "__dict__"):
+                        output = str(output.__dict__)
+                    else:
+                        output = str(output)
+
+                return output
+
+        except Exception as e:
+            last_error = e
+            is_retryable = "500" in str(e) or "parsing" in str(e).lower()
+            if is_retryable and attempt < MAX_BRIEFING_RETRIES:
+                wait = 2 ** attempt  # 2s, 4s
+                logger.warning(
+                    f"Briefing '{briefing_name}' attempt {attempt}/{MAX_BRIEFING_RETRIES} "
+                    f"failed with retryable error, retrying in {wait}s: {e}"
+                )
+                await asyncio.sleep(wait)
+            else:
+                logger.error(
+                    f"Briefing '{briefing_name}' failed after {attempt} attempt(s): {e}",
+                    exc_info=True,
+                )
+                return f"❌ Error generating briefing: {str(e)}"
+
+    # Should not reach here, but just in case
+    return f"❌ Error generating briefing after {MAX_BRIEFING_RETRIES} attempts: {str(last_error)}"
+
+
 async def main():
     """Start the Unix domain socket server."""
     if os.path.exists(SOCKET_PATH):
@@ -498,6 +773,13 @@ async def main():
     # Start the reminder scheduler in the background
     scheduler = ReminderScheduler(send_fn=whatsapp_send_message)
     asyncio.create_task(scheduler.run())
+
+    # Start the briefing scheduler in the background
+    briefing_scheduler = BriefingScheduler(
+        execute_fn=execute_briefing_prompt,
+        send_fn=whatsapp_send_message,
+    )
+    asyncio.create_task(briefing_scheduler.run())
 
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o666)
