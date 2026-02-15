@@ -6,7 +6,9 @@ import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from typing import Callable, Any
 
+from croniter import croniter
 from dotenv import load_dotenv
 
 logger = logging.getLogger("Reminder")
@@ -14,6 +16,7 @@ logger = logging.getLogger("Reminder")
 load_dotenv(override=True)
 
 _db_migrated = False
+_recurring_db_migrated = False
 
 TZ = ZoneInfo("America/Los_Angeles")
 DB_PATH = os.path.join(
@@ -32,7 +35,7 @@ def validate_reminder_time(dt: datetime) -> None:
         raise ValueError("The reminder time is in the past.")
 
 
-# ── Persistence ──────────────────────────────────────────────────────────────
+# ── One-Shot Reminder Persistence ────────────────────────────────────────────
 
 
 def _get_db() -> sqlite3.Connection:
@@ -112,7 +115,7 @@ def mark_fired(reminder_id: int) -> None:
     conn.commit()
 
 
-# ── Scheduler ────────────────────────────────────────────────────────────────
+# ── One-Shot Reminder Scheduler ──────────────────────────────────────────────
 
 
 class ReminderScheduler:
@@ -162,4 +165,148 @@ class ReminderScheduler:
                 self._conn = None
             except Exception:
                 logger.exception("Error in reminder scheduler loop")
+            await asyncio.sleep(POLL_INTERVAL)
+
+
+# ── Recurring Reminder Persistence ───────────────────────────────────────────
+
+
+def _get_recurring_db() -> sqlite3.Connection:
+    """Return a connection with recurring_reminders table, migrating on first call."""
+    global _recurring_db_migrated
+    conn = sqlite3.connect(DB_PATH)
+    if not _recurring_db_migrated:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS recurring_reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message TEXT NOT NULL,
+                schedule_cron TEXT NOT NULL,
+                chat_jid TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_run_at TEXT,
+                next_run_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_recurring_reminders_enabled_next_run
+            ON recurring_reminders(enabled, next_run_at)
+        """)
+        conn.commit()
+        _recurring_db_migrated = True
+    return conn
+
+
+def store_recurring_reminder(
+    message: str,
+    schedule_cron: str,
+    chat_jid: str,
+    next_run_at: datetime,
+) -> int:
+    """Insert a new recurring reminder. Returns its row id."""
+    conn = _get_recurring_db()
+    cur = conn.execute(
+        "INSERT INTO recurring_reminders (message, schedule_cron, chat_jid, enabled, created_at, next_run_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            message,
+            schedule_cron,
+            chat_jid,
+            1,
+            datetime.now(TZ).isoformat(),
+            next_run_at.isoformat(),
+        ),
+    )
+    conn.commit()
+    row_id: int | None = cur.lastrowid
+    if row_id is None:
+        raise RuntimeError("Failed to get row id after insert")
+    return row_id
+
+
+def get_all_recurring_reminders() -> list:
+    """Return all recurring reminders."""
+    conn = _get_recurring_db()
+    rows = conn.execute(
+        "SELECT id, message, schedule_cron, chat_jid, enabled, created_at, last_run_at, next_run_at FROM recurring_reminders ORDER BY id"
+    ).fetchall()
+    return rows
+
+
+def delete_recurring_reminder(reminder_id: int) -> bool:
+    """Delete a recurring reminder by id. Returns True if deleted."""
+    conn = _get_recurring_db()
+    cur = conn.execute("DELETE FROM recurring_reminders WHERE id = ?", (reminder_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_all_recurring_reminders() -> int:
+    """Remove all recurring reminders. Returns the number deleted."""
+    conn = _get_recurring_db()
+    cur = conn.execute("DELETE FROM recurring_reminders")
+    conn.commit()
+    return cur.rowcount
+
+
+# ── Recurring Reminder Scheduler ─────────────────────────────────────────────
+
+
+class RecurringReminderScheduler:
+    """Async background loop that fires due recurring reminders."""
+
+    def __init__(
+        self,
+        send_fn: Callable[[str, str, str | None, str | None], tuple[bool, Any]],
+    ):
+        """send_fn(chat_jid, message, reply_to, reply_to_sender) -> (bool, Any)."""
+        self._send_fn = send_fn
+        self._conn: sqlite3.Connection | None = None
+
+    def _ensure_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = _get_recurring_db()
+        return self._conn
+
+    async def run(self):
+        """Poll every 60 seconds for due recurring reminders and fire them."""
+        logger.info("Recurring reminder scheduler started")
+        while True:
+            try:
+                conn = self._ensure_conn()
+                now_iso = datetime.now(TZ).isoformat()
+                rows = conn.execute(
+                    "SELECT id, message, schedule_cron, chat_jid FROM recurring_reminders WHERE enabled = 1 AND next_run_at <= ?",
+                    (now_iso,),
+                ).fetchall()
+                for rid, message, schedule_cron, chat_jid in rows:
+                    text = f"⏰ *Reminder*\n\n{message}"
+                    success, result = self._send_fn(
+                        chat_jid, text, None, None,
+                    )
+                    if success:
+                        now = datetime.now(TZ)
+                        itr = croniter(schedule_cron, now)
+                        next_run = itr.get_next(datetime)
+                        if next_run.tzinfo is None:
+                            next_run = next_run.replace(tzinfo=TZ)
+                        conn.execute(
+                            "UPDATE recurring_reminders SET last_run_at = ?, next_run_at = ? WHERE id = ?",
+                            (now.isoformat(), next_run.isoformat(), rid),
+                        )
+                        conn.commit()
+                        logger.info(
+                            f"Fired recurring reminder {rid} to {chat_jid}, next run: {next_run}"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to fire recurring reminder {rid}: {result}"
+                        )
+            except sqlite3.OperationalError:
+                logger.warning(
+                    "DB connection error in recurring reminder scheduler, reconnecting"
+                )
+                self._conn = None
+            except Exception:
+                logger.exception("Error in recurring reminder scheduler loop")
             await asyncio.sleep(POLL_INTERVAL)

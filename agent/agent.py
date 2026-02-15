@@ -29,7 +29,16 @@ WHATSAPP_MCP_DIR = os.path.join(
 )
 sys.path.insert(0, WHATSAPP_MCP_DIR)
 from whatsapp import send_message as whatsapp_send_message
-from reminder import validate_reminder_time, store_reminder, ReminderScheduler
+from reminder import (
+    validate_reminder_time,
+    store_reminder,
+    ReminderScheduler,
+    RecurringReminderScheduler,
+    store_recurring_reminder,
+    get_all_recurring_reminders,
+    delete_recurring_reminder,
+    delete_all_recurring_reminders,
+)
 from briefing import (
     BriefingScheduler,
     add_briefing,
@@ -458,6 +467,174 @@ Create automated AI briefings that run on a schedule.
     await _reply(message, help_text)
 
 
+# ── #reminder command handlers ──────────────────────────────────────────────
+
+
+async def handle_reminder_command(message: ReceivedMessage):
+    """Handle #reminder commands for managing recurring reminders."""
+    content = message.content.strip()
+    parts = content.split(maxsplit=2)
+
+    if len(parts) < 2:
+        await send_reminder_help(message)
+        return
+
+    subcommand = parts[1].lower()
+
+    try:
+        if subcommand == "add":
+            await handle_reminder_add(message)
+        elif subcommand == "list":
+            await handle_reminder_list(message)
+        elif subcommand == "remove":
+            await handle_reminder_remove(message, parts)
+        elif subcommand == "remove-all":
+            await handle_reminder_remove_all(message)
+        elif subcommand == "help":
+            await send_reminder_help(message)
+        else:
+            await _reply(
+                message,
+                f"❌ Unknown reminder command: {subcommand}\n\nUse #reminder help for usage.",
+            )
+    except Exception as e:
+        logger.error(f"Error handling reminder command: {e}", exc_info=True)
+        await _reply(message, f"❌ Error: {str(e)}")
+
+
+async def handle_reminder_add(message: ReceivedMessage):
+    """Handle #reminder add command.
+
+    Format: #reminder add "schedule" reminder message text
+    Example: #reminder add "9pm everyday" brush teeth
+    """
+    content = message.content.strip()
+
+    # Extract the quoted schedule string
+    quoted = re.findall(r'"([^"]*)"', content)
+
+    if not quoted:
+        await _reply(
+            message,
+            '❌ Usage: #reminder add "Schedule" Reminder text...\n\nExample:\n#reminder add "9pm everyday" brush teeth',
+        )
+        return
+
+    schedule = quoted[0]
+
+    # Get reminder message (everything after the quoted schedule)
+    msg_start = content.find(f'"{schedule}"') + len(f'"{schedule}"')
+    reminder_message = content[msg_start:].strip()
+
+    if not reminder_message:
+        await _reply(message, "❌ Please provide a reminder message.")
+        return
+
+    try:
+        cron_expr = parse_schedule_to_cron(schedule)
+        next_run = get_next_run_from_cron(cron_expr)
+        reminder_id = store_recurring_reminder(
+            reminder_message, cron_expr, message.chat_jid, next_run
+        )
+        next_run_str = next_run.strftime("%b %d, %I:%M %p %Z")
+
+        await _reply(
+            message,
+            f"⏰ Recurring reminder created!\n\n*Reminder:* {reminder_message}\n*Schedule:* {schedule}\n*Cron:* {cron_expr}\n*Next run:* {next_run_str}\n*ID:* {reminder_id}",
+        )
+        logger.info(f"Recurring reminder '{reminder_message}' created with ID {reminder_id}")
+    except ValueError as e:
+        await _reply(message, f"❌ {e}")
+
+
+async def handle_reminder_list(message: ReceivedMessage):
+    """Handle #reminder list command."""
+    rows = get_all_recurring_reminders()
+
+    if not rows:
+        await _reply(
+            message,
+            "⏰ No recurring reminders configured.\n\nUse #reminder add to create one.",
+        )
+        return
+
+    lines = ["⏰ *Recurring Reminders:*\n"]
+    for row in rows:
+        rid, msg, cron, chat_jid, enabled, created_at, last_run_at, next_run_at = row
+        status = "✅" if enabled else "⏸️"
+        if next_run_at:
+            try:
+                next_dt = datetime.fromisoformat(next_run_at)
+                next_str = next_dt.strftime("%b %d, %I:%M %p")
+            except (ValueError, TypeError):
+                next_str = next_run_at
+        else:
+            next_str = "Not scheduled"
+        lines.append(f"{status} *ID {rid}:* {msg}")
+        lines.append(f"   Schedule: {cron}")
+        lines.append(f"   Next: {next_str}\n")
+
+    await _reply(message, "\n".join(lines))
+
+
+async def handle_reminder_remove(message: ReceivedMessage, parts: list):
+    """Handle #reminder remove command."""
+    if len(parts) < 3:
+        await _reply(message, "❌ Usage: #reminder remove <id>")
+        return
+
+    try:
+        reminder_id = int(parts[2])
+        if delete_recurring_reminder(reminder_id):
+            await _reply(message, f"✅ Recurring reminder {reminder_id} removed.")
+            logger.info(f"Recurring reminder {reminder_id} removed")
+        else:
+            await _reply(message, f"❌ Recurring reminder {reminder_id} not found.")
+    except ValueError:
+        await _reply(message, "❌ Please provide a valid reminder ID number.")
+
+
+async def handle_reminder_remove_all(message: ReceivedMessage):
+    """Handle #reminder remove-all command."""
+    count = delete_all_recurring_reminders()
+    await _reply(message, f"✅ Removed all recurring reminders ({count} deleted).")
+    logger.info(f"All recurring reminders removed ({count} deleted)")
+
+
+async def send_reminder_help(message: ReceivedMessage):
+    """Send recurring reminder help message."""
+    help_text = """⏰ *Reminder Commands*
+
+Create recurring reminders that fire on a schedule.
+
+*Commands:*
+• #reminder add "Schedule" Reminder text
+  _Create a new recurring reminder_
+  Example: #reminder add "9pm everyday" brush teeth
+
+• #reminder list
+  _Show all recurring reminders_
+
+• #reminder remove <id>
+  _Remove a reminder by ID_
+
+• #reminder remove-all
+  _Remove all recurring reminders_
+
+• #reminder help
+  _Show this help_
+
+*Schedule formats:*
+• "9pm everyday" - Daily at 9 PM
+• "8am monday" - Mondays at 8 AM
+• "5pm friday" - Fridays at 5 PM
+• "every morning" - Daily at 9 AM
+
+_For one-time reminders, use #remindme instead._
+"""
+    await _reply(message, help_text)
+
+
 async def process_message(data: dict):
     """Process a single message asynchronously."""
     if logger.isEnabledFor(logging.DEBUG):
@@ -499,6 +676,18 @@ async def process_message(data: dict):
     if "#remindme" in message.content.lower():
         return
 
+    # ── Handle #reminder commands ─────────────────────────
+    if (
+        IS_DEDICATED_NUMBER
+        and "#reminder" in message.content.lower()
+        and message.phone_number in ALLOWED_SENDERS
+    ):
+        await handle_reminder_command(message)
+        return
+
+    if "#reminder" in message.content.lower():
+        return
+
     # ── Handle #briefing commands ─────────────────────────
     if (
         IS_DEDICATED_NUMBER
@@ -506,6 +695,9 @@ async def process_message(data: dict):
         and message.phone_number in ALLOWED_SENDERS
     ):
         await handle_briefing_command(message)
+        return
+
+    if "#briefing" in message.content.lower():
         return
 
     should_leo_respond = False
@@ -781,6 +973,10 @@ async def main():
         send_fn=whatsapp_send_message,
     )
     asyncio.create_task(briefing_scheduler.run())
+
+    # Start the recurring reminder scheduler in the background
+    recurring_scheduler = RecurringReminderScheduler(send_fn=whatsapp_send_message)
+    asyncio.create_task(recurring_scheduler.run())
 
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o666)
