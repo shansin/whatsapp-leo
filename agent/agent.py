@@ -79,10 +79,7 @@ IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true
 MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "10485760"))
 
 # MCP Server Paths
-WORKSPACE_MCP_PATH = os.getenv(
-    "WORKSPACE_MCP_PATH",
-    "/home/shsin/git_linux/workspace/workspace-server/dist/index.js",
-)
+WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH")
 
 # ── Cached singletons (avoid re-creation per message) ───────────────────────
 _openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
@@ -744,13 +741,16 @@ async def process_message(data: dict):
 
                 # Conditionally start privileged MCPs
                 if is_allowed:
-                    workspace_mcp_server = await stack.enter_async_context(
-                        MCPServerStdio(
-                            params=_workspace_mcp_params,
-                            client_session_timeout_seconds=300,
+                    if os.path.exists(WORKSPACE_MCP_PATH):
+                        workspace_mcp_server = await stack.enter_async_context(
+                            MCPServerStdio(
+                                params=_workspace_mcp_params,
+                                client_session_timeout_seconds=300,
+                            )
                         )
-                    )
-                    mcp_servers.append(workspace_mcp_server)
+                        mcp_servers.append(workspace_mcp_server)
+                    else:
+                        logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
 
                     garmin_mcp_server = await stack.enter_async_context(
                         MCPServerStdio(
@@ -893,20 +893,25 @@ If any tool call fails or returns an error, skip that section gracefully and con
                         params=_brave_mcp_params, client_session_timeout_seconds=30
                     )
                 )
-                workspace_mcp_server = await stack.enter_async_context(
-                    MCPServerStdio(
-                        params=_workspace_mcp_params,
-                        client_session_timeout_seconds=300,
+                mcp_servers = [brave_mcp_server]
+
+                if os.path.exists(WORKSPACE_MCP_PATH):
+                    workspace_mcp_server = await stack.enter_async_context(
+                        MCPServerStdio(
+                            params=_workspace_mcp_params,
+                            client_session_timeout_seconds=300,
+                        )
                     )
-                )
+                    mcp_servers.append(workspace_mcp_server)
+                else:
+                    logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
                 garmin_mcp_server = await stack.enter_async_context(
                     MCPServerStdio(
                         params=_garmin_mcp_params,
                         client_session_timeout_seconds=120,
                     )
                 )
-
-                mcp_servers = [brave_mcp_server, workspace_mcp_server, garmin_mcp_server]
+                mcp_servers.append(garmin_mcp_server)
 
                 # Create a fresh agent for each attempt (avoids poisoned conversation state)
                 briefing_agent = Agent(
