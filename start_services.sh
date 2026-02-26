@@ -35,8 +35,8 @@ cleanup() {
     CLEANUP_DONE=1
     echo ""
     echo "Shutting down services..."
-    kill $GO_PID $AGENT_PID 2>/dev/null || true
-    wait $GO_PID $AGENT_PID 2>/dev/null || true
+    kill ${GO_PID:-} ${AGENT_PID:-} 2>/dev/null || true
+    wait ${GO_PID:-} ${AGENT_PID:-} 2>/dev/null || true
     # Clean up socket files
     rm -f "$AGENT_SOCKET_PATH" "$BRIDGE_SOCKET_PATH"
     echo "Services stopped."
@@ -55,20 +55,34 @@ echo "      Agent server started (PID: $AGENT_PID)"
 sleep 2
 
 # Start the Go WhatsApp bridge server
-echo "[2/2] Starting Go WhatsApp bridge server..."
-cd "$PROJECT_DIR/whatsapp-mcp/whatsapp-bridge"
-# Build first to ensure we have the latest binary
-go build -o whatsapp-bridge .
-./whatsapp-bridge &
-GO_PID=$!
-echo "      Go server started (PID: $GO_PID)"
+if [ "$IS_TEST_MODE" != "true" ]; then
+    echo "[2/2] Starting Go WhatsApp bridge server..."
+    cd "$PROJECT_DIR/whatsapp-mcp/whatsapp-bridge"
+    # Build first to ensure we have the latest binary
+    go build -o whatsapp-bridge .
+    ./whatsapp-bridge &
+    GO_PID=$!
+    echo "      Go server started (PID: $GO_PID)"
 
-echo ""
-echo "✓ All services started!"
-echo "  - Go server (WhatsApp bridge): $BRIDGE_SOCKET_PATH (Unix socket)"
-echo "  - Agent server: $AGENT_SOCKET_PATH (Unix socket)"
-echo ""
+    echo ""
+    echo "✓ All services started!"
+    echo "  - Go server (WhatsApp bridge): $BRIDGE_SOCKET_PATH (Unix socket)"
+    echo "  - Agent server: $AGENT_SOCKET_PATH (Unix socket)"
+    echo ""
+else
+    echo "[2/2] Skipping Go WhatsApp bridge start due to IS_TEST_MODE=true"
+    echo ""
+    echo "✓ Test Mode services started!"
+    echo "  - Agent server (Gradio UI): http://127.0.0.1:7860"
+    echo ""
+    GO_PID=""
+fi
+
 echo "Press Ctrl+C to stop all services"
 
 # Wait for both processes
-wait $GO_PID $AGENT_PID
+if [ -n "$GO_PID" ]; then
+    wait $GO_PID $AGENT_PID
+else
+    wait $AGENT_PID
+fi
