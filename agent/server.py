@@ -12,6 +12,7 @@ from logging_setup import logger
 from whatsapp import send_message as whatsapp_send_message
 from reminder import ReminderScheduler, RecurringReminderScheduler
 from briefing import BriefingScheduler
+from hooks import init_hooks, cleanup_hooks
 
 
 async def handle_client(reader, writer):
@@ -89,10 +90,16 @@ async def main():
     recurring_scheduler = RecurringReminderScheduler(send_fn=whatsapp_send_message)
     asyncio.create_task(recurring_scheduler.run())
 
+    # Initialise hook FIFOs (no-op if IS_HOOK_ENABLED is false)
+    init_hooks()
+
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chmod(SOCKET_PATH, 0o666)
 
     logger.info(f"Unix domain socket Agent Server running at {SOCKET_PATH}")
 
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        cleanup_hooks()

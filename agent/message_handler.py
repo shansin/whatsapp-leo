@@ -26,6 +26,7 @@ from models import ReceivedMessage
 from agent_factory import agent_factory, parse_remindme_with_agent, TZ
 from command_handlers import handle_briefing_command, handle_reminder_command
 from reminder import validate_reminder_time, store_reminder
+from hooks import match_hook, write_to_hook
 from logging_setup import logger
 
 
@@ -49,6 +50,13 @@ async def process_message(data: dict):
     if logger.isEnabledFor(10):  # logging.DEBUG
         logger.debug("Full message payload: %s", orjson.dumps(data).decode())
     message = ReceivedMessage.from_dict(data)
+
+    # ── Hook intercept ──────────────────────────
+    hook_match = match_hook(message.content)
+    if hook_match and message.phone_number in ALLOWED_SENDERS:
+        hook_name, body = hook_match
+        await write_to_hook(hook_name, body)
+        return
 
     is_leo_mentioned = (
         "#leo" in message.content.lower() or "@leo" in message.content.lower()

@@ -15,6 +15,20 @@ if [ -f "$PROJECT_DIR/.env" ]; then
     set +a
 fi
 
+# Print hook FIFO paths if enabled
+if [ "${IS_HOOK_ENABLED:-false}" = "true" ] && [ -n "$HOOKS" ]; then
+    echo ""
+    echo "🪝 Hooks enabled. FIFOs:"
+    IFS=',' read -ra HOOK_NAMES <<< "$HOOKS"
+    for hook in "${HOOK_NAMES[@]}"; do
+        hook=$(echo "$hook" | xargs)  # trim whitespace
+        echo "  ${hook}:"
+        echo "    read  ← /tmp/whatsapp-leo-hook-${INSTANCE_GUID:-default}-${hook}-in.fifo"
+        echo "    write → /tmp/whatsapp-leo-hook-${INSTANCE_GUID:-default}-${hook}-out.fifo"
+    done
+    echo ""
+fi
+
 # Get instance GUID (default to "default" if not set)
 INSTANCE_GUID="${INSTANCE_GUID:-default}"
 

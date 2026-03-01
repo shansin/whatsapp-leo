@@ -40,6 +40,10 @@ ALLOWED_SENDERS = [
 LEO_MENTION_ID = os.getenv("LEO_MENTION_ID", "@23833461416078")
 IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true"
 
+# ── Hooks ────────────────────────────────────────────────────────────────────
+IS_HOOK_ENABLED = os.getenv("IS_HOOK_ENABLED", "false").lower() == "true"
+HOOKS = [h.strip() for h in os.getenv("HOOKS", "").split(",") if h.strip()]
+
 # Maximum message size to prevent memory exhaustion (10MB)
 MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "10485760"))
 
