@@ -1,23 +1,20 @@
 """Briefing module for WhatsApp Leo — schedule automated AI-driven briefings."""
 
+import re
 import sqlite3
 import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from typing import Callable, Any
 from croniter import croniter
 
-from dotenv import load_dotenv
+from config import TZ
 
 logger = logging.getLogger("Briefing")
 
-load_dotenv(override=True)
-
+_db_conn: sqlite3.Connection | None = None
 _db_migrated = False
-
-TZ = ZoneInfo("America/Los_Angeles")
 DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "store", "briefings.db"
 )
@@ -27,11 +24,14 @@ POLL_INTERVAL = int(os.getenv("BRIEFING_POLL_INTERVAL", "60"))
 
 
 def _get_db() -> sqlite3.Connection:
-    """Return a connection, running schema migration only on first call."""
-    global _db_migrated
-    conn = sqlite3.connect(DB_PATH)
+    """Return a singleton connection with WAL mode, migrating schema on first call."""
+    global _db_conn, _db_migrated
+    if _db_conn is None:
+        _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA synchronous=NORMAL")
     if not _db_migrated:
-        conn.execute("""
+        _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS briefings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -44,15 +44,14 @@ def _get_db() -> sqlite3.Connection:
                 next_run_at TEXT NOT NULL
             )
         """)
-        conn.commit()
-        # Performance indexes
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_briefings_enabled_next_run 
+        _db_conn.commit()
+        _db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_briefings_enabled_next_run
             ON briefings(enabled, next_run_at)
         """)
-        conn.commit()
+        _db_conn.commit()
         _db_migrated = True
-    return conn
+    return _db_conn
 
 
 def store_briefing(
@@ -150,9 +149,6 @@ def parse_schedule_to_cron(schedule_str: str) -> str:
     """
     schedule_lower = schedule_str.lower().strip()
 
-    # Time extraction
-    import re
-
     # Extract hour and minute
     time_match = re.search(r"(\d+)(?::(\d+))?\s*(am|pm)?", schedule_lower)
     hour = 9  # default
@@ -244,19 +240,13 @@ class BriefingScheduler:
         """
         self._execute_fn = execute_fn
         self._send_fn = send_fn
-        self._conn: sqlite3.Connection | None = None
 
     def _ensure_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = _get_db()
-        return self._conn
+        return _get_db()
 
     async def run(self):
         """Poll every 60 seconds for due briefings and execute them."""
         logger.info("Briefing scheduler started")
-
-        # Seed initial briefings if database is empty
-        await self._seed_default_briefings()
 
         while True:
             try:
@@ -317,30 +307,16 @@ class BriefingScheduler:
                         )
 
             except sqlite3.OperationalError:
+                global _db_conn, _db_migrated
                 logger.warning(
                     "DB connection error in briefing scheduler, reconnecting"
                 )
-                self._conn = None
+                _db_conn = None
+                _db_migrated = False
             except Exception:
                 logger.exception("Error in briefing scheduler loop")
 
             await asyncio.sleep(POLL_INTERVAL)
-
-    async def _seed_default_briefings(self):
-        """Seed default briefings if none exist."""
-        try:
-            conn = self._ensure_conn()
-            count = conn.execute("SELECT COUNT(*) FROM briefings").fetchone()[0]
-
-            if count == 0:
-                logger.info(
-                    "No existing briefings found - user can create them with #briefing command"
-                )
-                # Note: We don't seed default briefings automatically
-                # Users should create their own briefings using #briefing add
-
-        except Exception as e:
-            logger.error(f"Error checking briefings: {e}")
 
 
 # ── Briefing Management Functions ───────────────────────────────────────────

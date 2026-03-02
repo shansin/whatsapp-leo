@@ -1,25 +1,19 @@
 """Core message processing for WhatsApp Leo agent."""
 
-import os
 import asyncio
-from contextlib import AsyncExitStack
 from dataclasses import asdict
 from datetime import datetime
 
 import orjson
 from agents import Runner, trace
-from agents.mcp import MCPServerStdio
 from whatsapp import send_message as whatsapp_send_message
 
 from config import (
     IS_DEDICATED_NUMBER,
     ALLOWED_SENDERS,
     LEO_MENTION_ID,
-    WORKSPACE_MCP_PATH,
     _cached_model,
-    _brave_mcp_params,
-    _workspace_mcp_params,
-    _garmin_mcp_params,
+    mcp_stack,
 )
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE, INSTRUCTIONS_BASIC_TEMPLATE
 from models import ReceivedMessage
@@ -147,37 +141,7 @@ async def process_message(data: dict):
             )
             instructions = template.format(current_time=current_time)
 
-            async with AsyncExitStack() as stack:
-                # Start Brave MCP server (WhatsApp is handled via direct function calls)
-                brave_mcp_server = await stack.enter_async_context(
-                    MCPServerStdio(
-                        params=_brave_mcp_params, client_session_timeout_seconds=30
-                    )
-                )
-
-                mcp_servers = [brave_mcp_server]
-
-                # Conditionally start privileged MCPs
-                if is_allowed:
-                    if os.path.exists(WORKSPACE_MCP_PATH):
-                        workspace_mcp_server = await stack.enter_async_context(
-                            MCPServerStdio(
-                                params=_workspace_mcp_params,
-                                client_session_timeout_seconds=300,
-                            )
-                        )
-                        mcp_servers.append(workspace_mcp_server)
-                    else:
-                        logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
-
-                    garmin_mcp_server = await stack.enter_async_context(
-                        MCPServerStdio(
-                            params=_garmin_mcp_params,
-                            client_session_timeout_seconds=120,
-                        )
-                    )
-                    mcp_servers.append(garmin_mcp_server)
-
+            async with mcp_stack(is_privileged=is_allowed) as mcp_servers:
                 agent, session = await agent_factory.get_agent(
                     chat_jid=message.chat_jid,
                     mcp_servers=mcp_servers,
@@ -192,7 +156,6 @@ async def process_message(data: dict):
 
                 logger.info(f"Agent execution completed. Result: {result.final_output}")
 
-                # Send the agent's response directly via WhatsApp
                 if result.final_output:
                     success, send_result = await asyncio.to_thread(
                         whatsapp_send_message,

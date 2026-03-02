@@ -1,19 +1,13 @@
 """Briefing execution through the AI agent pipeline with retry logic."""
 
-import os
 import asyncio
-from contextlib import AsyncExitStack
 from datetime import datetime
 
 from agents import Agent, Runner, trace, SQLiteSession
-from agents.mcp import MCPServerStdio
 
 from config import (
-    WORKSPACE_MCP_PATH,
     _cached_model,
-    _brave_mcp_params,
-    _workspace_mcp_params,
-    _garmin_mcp_params,
+    mcp_stack,
 )
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE
 from agent_factory import TZ
@@ -59,33 +53,7 @@ If any tool call fails or returns an error, skip that section gracefully and con
     last_error = None
     for attempt in range(1, MAX_BRIEFING_RETRIES + 1):
         try:
-            async with AsyncExitStack() as stack:
-                # Start all MCP servers
-                brave_mcp_server = await stack.enter_async_context(
-                    MCPServerStdio(
-                        params=_brave_mcp_params, client_session_timeout_seconds=30
-                    )
-                )
-                mcp_servers = [brave_mcp_server]
-
-                if os.path.exists(WORKSPACE_MCP_PATH):
-                    workspace_mcp_server = await stack.enter_async_context(
-                        MCPServerStdio(
-                            params=_workspace_mcp_params,
-                            client_session_timeout_seconds=300,
-                        )
-                    )
-                    mcp_servers.append(workspace_mcp_server)
-                else:
-                    logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
-                garmin_mcp_server = await stack.enter_async_context(
-                    MCPServerStdio(
-                        params=_garmin_mcp_params,
-                        client_session_timeout_seconds=120,
-                    )
-                )
-                mcp_servers.append(garmin_mcp_server)
-
+            async with mcp_stack(is_privileged=True) as mcp_servers:
                 # Create a fresh agent for each attempt (avoids poisoned conversation state)
                 briefing_agent = Agent(
                     name=f"LeoBriefing-{briefing_name}",

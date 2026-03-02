@@ -5,20 +5,18 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import Callable, Any
 
 from croniter import croniter
-from dotenv import load_dotenv
+
+from config import TZ
 
 logger = logging.getLogger("Reminder")
 
-load_dotenv(override=True)
-
+_db_conn: sqlite3.Connection | None = None
 _db_migrated = False
+_recurring_db_conn: sqlite3.Connection | None = None
 _recurring_db_migrated = False
-
-TZ = ZoneInfo("America/Los_Angeles")
 DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "store", "reminders.db"
 )
@@ -39,11 +37,14 @@ def validate_reminder_time(dt: datetime) -> None:
 
 
 def _get_db() -> sqlite3.Connection:
-    """Return a connection, running schema migration only on first call."""
-    global _db_migrated
-    conn = sqlite3.connect(DB_PATH)
+    """Return a singleton connection with WAL mode, migrating schema on first call."""
+    global _db_conn, _db_migrated
+    if _db_conn is None:
+        _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _db_conn.execute("PRAGMA journal_mode=WAL")
+        _db_conn.execute("PRAGMA synchronous=NORMAL")
     if not _db_migrated:
-        conn.execute("""
+        _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_jid TEXT NOT NULL,
@@ -55,22 +56,20 @@ def _get_db() -> sqlite3.Connection:
                 sender_jid TEXT
             )
         """)
-        conn.commit()
-        # Migrate: add columns if missing (for DBs created before these columns existed)
+        _db_conn.commit()
         for col in ["message_id TEXT", "sender_jid TEXT"]:
             try:
-                conn.execute(f"ALTER TABLE reminders ADD COLUMN {col}")
-                conn.commit()
+                _db_conn.execute(f"ALTER TABLE reminders ADD COLUMN {col}")
+                _db_conn.commit()
             except sqlite3.OperationalError:
-                pass  # column already exists
-        # Performance indexes for efficient reminder queries
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_reminders_fired_remind_at 
+                pass
+        _db_conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reminders_fired_remind_at
             ON reminders(fired, remind_at)
         """)
-        conn.commit()
+        _db_conn.commit()
         _db_migrated = True
-    return conn
+    return _db_conn
 
 
 def store_reminder(
@@ -124,13 +123,9 @@ class ReminderScheduler:
     def __init__(self, send_fn):
         """send_fn must be a callable(chat_jid, message, reply_to, reply_to_sender) -> (bool, Any)."""
         self._send_fn = send_fn
-        # Persistent connection avoids open/close churn every 60s
-        self._conn: sqlite3.Connection | None = None
 
     def _ensure_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = _get_db()
-        return self._conn
+        return _get_db()
 
     async def run(self):
         """Poll every 60 seconds for due reminders and fire them."""
@@ -160,9 +155,11 @@ class ReminderScheduler:
                     else:
                         logger.error(f"Failed to fire reminder {rid}: {result}")
             except sqlite3.OperationalError:
-                # DB might have been locked or corrupted; reset connection
+                # DB might have been locked or corrupted; reset singleton
+                global _db_conn, _db_migrated
                 logger.warning("DB connection error in scheduler, reconnecting")
-                self._conn = None
+                _db_conn = None
+                _db_migrated = False
             except Exception:
                 logger.exception("Error in reminder scheduler loop")
             await asyncio.sleep(POLL_INTERVAL)
@@ -172,11 +169,14 @@ class ReminderScheduler:
 
 
 def _get_recurring_db() -> sqlite3.Connection:
-    """Return a connection with recurring_reminders table, migrating on first call."""
-    global _recurring_db_migrated
-    conn = sqlite3.connect(DB_PATH)
+    """Return a singleton connection for recurring reminders with WAL mode."""
+    global _recurring_db_conn, _recurring_db_migrated
+    if _recurring_db_conn is None:
+        _recurring_db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        _recurring_db_conn.execute("PRAGMA journal_mode=WAL")
+        _recurring_db_conn.execute("PRAGMA synchronous=NORMAL")
     if not _recurring_db_migrated:
-        conn.execute("""
+        _recurring_db_conn.execute("""
             CREATE TABLE IF NOT EXISTS recurring_reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message TEXT NOT NULL,
@@ -188,14 +188,14 @@ def _get_recurring_db() -> sqlite3.Connection:
                 next_run_at TEXT NOT NULL
             )
         """)
-        conn.commit()
-        conn.execute("""
+        _recurring_db_conn.commit()
+        _recurring_db_conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_recurring_reminders_enabled_next_run
             ON recurring_reminders(enabled, next_run_at)
         """)
-        conn.commit()
+        _recurring_db_conn.commit()
         _recurring_db_migrated = True
-    return conn
+    return _recurring_db_conn
 
 
 def store_recurring_reminder(
@@ -261,12 +261,9 @@ class RecurringReminderScheduler:
     ):
         """send_fn(chat_jid, message, reply_to, reply_to_sender) -> (bool, Any)."""
         self._send_fn = send_fn
-        self._conn: sqlite3.Connection | None = None
 
     def _ensure_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = _get_recurring_db()
-        return self._conn
+        return _get_recurring_db()
 
     async def run(self):
         """Poll every 60 seconds for due recurring reminders and fire them."""
@@ -303,10 +300,12 @@ class RecurringReminderScheduler:
                             f"Failed to fire recurring reminder {rid}: {result}"
                         )
             except sqlite3.OperationalError:
+                global _recurring_db_conn, _recurring_db_migrated
                 logger.warning(
                     "DB connection error in recurring reminder scheduler, reconnecting"
                 )
-                self._conn = None
+                _recurring_db_conn = None
+                _recurring_db_migrated = False
             except Exception:
                 logger.exception("Error in recurring reminder scheduler loop")
             await asyncio.sleep(POLL_INTERVAL)

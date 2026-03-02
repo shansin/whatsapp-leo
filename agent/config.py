@@ -2,6 +2,8 @@
 
 import os
 import sys
+from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -11,6 +13,8 @@ from agents import OpenAIChatCompletionsModel
 from logging_setup import logger  # noqa: F401
 
 load_dotenv(override=True)
+
+TZ = ZoneInfo("America/Los_Angeles")
 
 # Add whatsapp-mcp-server to path for direct imports
 WHATSAPP_MCP_DIR = os.path.join(
@@ -75,3 +79,42 @@ _garmin_mcp_params = {
     "command": "uvx",
     "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
 }
+
+
+@asynccontextmanager
+async def mcp_stack(is_privileged: bool = False):
+    """Async context manager that starts and yields configured MCP servers.
+
+    Always starts Brave search MCP. If is_privileged, also starts workspace
+    MCP (if available) and Garmin MCP.
+    """
+    from contextlib import AsyncExitStack
+    from agents.mcp import MCPServerStdio
+
+    async with AsyncExitStack() as stack:
+        brave = await stack.enter_async_context(
+            MCPServerStdio(params=_brave_mcp_params, client_session_timeout_seconds=30)
+        )
+        servers = [brave]
+
+        if is_privileged:
+            if WORKSPACE_MCP_PATH and os.path.exists(WORKSPACE_MCP_PATH):
+                ws = await stack.enter_async_context(
+                    MCPServerStdio(
+                        params=_workspace_mcp_params,
+                        client_session_timeout_seconds=300,
+                    )
+                )
+                servers.append(ws)
+            elif WORKSPACE_MCP_PATH:
+                logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
+
+            garmin = await stack.enter_async_context(
+                MCPServerStdio(
+                    params=_garmin_mcp_params,
+                    client_session_timeout_seconds=120,
+                )
+            )
+            servers.append(garmin)
+
+        yield servers

@@ -3,18 +3,15 @@
 import time
 from collections import OrderedDict
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from dateutil import parser as dateutil_parser
 from agents import Agent, Runner, SQLiteSession
 from agents.mcp import MCPServerStdio
 
-from config import MAX_AGENTS, TTL_SECONDS, _cached_model
+from config import MAX_AGENTS, TTL_SECONDS, TZ, _cached_model
 from instructions import REMINDER_INSTRUCTIONS_TEMPLATE
 from models import ReminderParsed
 from logging_setup import logger
-
-TZ = ZoneInfo("America/Los_Angeles")
 
 
 class AgentFactory:

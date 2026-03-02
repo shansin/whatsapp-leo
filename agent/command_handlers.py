@@ -1,8 +1,10 @@
 """Command handlers for #briefing and #reminder WhatsApp commands."""
 
+import asyncio
 import re
 from datetime import datetime
 
+from whatsapp import send_message as whatsapp_send_message
 from models import ReceivedMessage
 from logging_setup import logger
 from reminder import (
@@ -23,9 +25,6 @@ from briefing import (
 
 async def _reply(message: ReceivedMessage, text: str) -> None:
     """Send a WhatsApp reply to the originating message (non-blocking)."""
-    import asyncio
-    from whatsapp import send_message as whatsapp_send_message
-
     await asyncio.to_thread(
         whatsapp_send_message,
         message.chat_jid,
