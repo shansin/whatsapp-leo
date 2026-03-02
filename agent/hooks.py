@@ -90,17 +90,17 @@ async def _read_outbound_fifo(hook_name: str) -> None:
     while True:
         try:
             # _blocking_read runs entirely in a thread so the event loop isn't blocked
-            line = await asyncio.to_thread(_blocking_read_line, path)
-            if line is None:
-                continue  # Writer closed, re-open
+            lines = await asyncio.to_thread(_blocking_read_lines, path)
+            if not lines:
+                continue  # Writer closed without content, re-open
 
-            text = f"{hook_name}: {line}"
+            text = f"_*({hook_name})*_ : {chr(10).join(lines)}"
             for sender in ALLOWED_SENDERS:
                 success, result = await asyncio.to_thread(
                     whatsapp_send_message, sender, text
                 )
                 if success:
-                    logger.info(f"Hook '{hook_name}' sent to {sender}: {line[:80]}")
+                    logger.info(f"Hook '{hook_name}' sent to {sender}: {text[:80]}")
                 else:
                     logger.error(
                         f"Hook '{hook_name}' send failed to {sender}: {result}"
@@ -113,24 +113,26 @@ async def _read_outbound_fifo(hook_name: str) -> None:
             await asyncio.sleep(1)
 
 
-def _blocking_read_line(path: str) -> str | None:
-    """Blocking read of one non-empty line from a FIFO. Runs in a thread.
+def _blocking_read_lines(path: str) -> list[str]:
+    """Blocking read of all non-empty lines from a FIFO. Runs in a thread.
 
-    Opens the FIFO (blocks until a writer connects), reads one line,
-    then returns. Returns None when the writer closes without writing.
+    Opens the FIFO (blocks until a writer connects), reads every line
+    until the writer closes (EOF), then returns them all. Returns an
+    empty list when the writer closes without writing any content.
 
     IMPORTANT: Uses readline() not 'for line in file' — Python's file
     iterator uses a hidden read-ahead buffer that breaks on FIFOs.
     """
     logger.debug(f"FIFO reader: waiting for writer on {path}")
+    lines: list[str] = []
     with open(path, "r") as fifo:
         while True:
             line = fifo.readline()
             if not line:
-                return None  # EOF — writer closed
+                return lines  # EOF — writer closed
             stripped = line.strip()
             if stripped:
-                return stripped
+                lines.append(stripped)
 
 
 async def write_to_hook(hook_name: str, message: str) -> None:
