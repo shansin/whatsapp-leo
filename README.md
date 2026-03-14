@@ -1,17 +1,17 @@
 # 🦁 WhatsApp Leo
 
-A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, and bridge messages to external programs through named-pipe hooks.
+A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, browse pages, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, and bridge messages to external programs through named-pipe hooks.
 
 ## Architecture
 
 ```
-┌──────────────┐  Unix Socket   ┌──────────────────┐   MCP (stdio)   ┌───────────────────┐
-│  Go WhatsApp │◄──────────────►│  Python Agent    │◄───────────────►│  MCP Servers       │
-│  Bridge      │                │  Server          │                 │  • Brave Search    │
-│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • Google Workspace│
-└──────────────┘                └──────────────────┘                 │  • Garmin Connect  │
-       │                               │                            └───────────────────┘
-       │                               │
+┌──────────────┐  Unix Socket   ┌──────────────────┐   MCP (stdio)   ┌───────────────────────┐
+│  Go WhatsApp │◄──────────────►│  Python Agent    │◄───────────────►│  MCP Servers           │
+│  Bridge      │                │  Server          │                 │  • Brave Search        │
+│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • Playwright Browser  │
+└──────────────┘                └──────────────────┘                 │  • Google Workspace    │
+       │                               │                             │  • Garmin Connect      │
+       │                               │                             └───────────────────────┘
   WhatsApp Web API              ┌──────┴──────┐
                                 │  SQLite DBs │
                                 │  • messages │
@@ -33,8 +33,9 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - WhatsApp-native formatting (bold, italic, lists, quotes)
 - Per-chat conversation memory via `SQLiteSession`
 
-### 🔍 Web Search
+### 🔍 Web Search & Browsing
 - Real-time web search via **Brave Search** MCP server
+- Full browser automation via **Playwright** — navigate URLs, click, fill forms, take screenshots, extract page content
 
 ### 📎 Google Workspace *(privileged users)*
 - **Google Docs** — create, read, update, move
@@ -75,6 +76,80 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - Non-privileged users can still chat and use web search
 - Dedicated-number mode (`IS_DEDICATED_NUMBER=true`) responds to all DMs; in shared-number mode Leo only responds when mentioned (`@leo` / `#leo`)
 
+## Tool Selection Framework
+
+With many MCP servers active, models can be overwhelmed by hundreds of tools and fail to pick the right one. Leo solves this with a per-server allowlist in **`agent/tools_config.py`**.
+
+### How it works
+
+`TOOL_CONFIG` maps each server name to either `None` (all tools) or an explicit allowlist. Every tool entry carries its description as an inline comment so you can read and trim the file without cross-referencing docs:
+
+```python
+# agent/tools_config.py
+TOOL_CONFIG: dict[str, list[str] | None] = {
+    "brave": None,   # only 2 tools — expose all
+
+    "playwright": [
+        "browser_navigate",          # Navigate to a URL
+        "browser_click",             # Perform click on a web page
+        "browser_take_screenshot",   # Take a screenshot of the current page
+        ...
+    ],
+
+    "workspace": [
+        "calendar.listEvents",       # Lists events from a calendar. Defaults to upcoming events.
+        "gmail.send",                # Send an email message.
+        "docs.find",                 # Finds Google Docs by searching for a query in their title.
+        ...
+    ],
+
+    "garmin": [
+        "get_sleep_data",            # Get full sleep data with all details
+        "get_stats",                 # Get daily activity stats with curated essential metrics
+        ...
+    ],
+}
+```
+
+To disable a tool, delete its line. The description tells you exactly what it does.
+
+`make_tool_filter(server_name)` converts these lists into `MCPServerStdio(tool_filter=...)` calls that the SDK applies before handing tools to the model. `cache_tools_list=True` is set on every server so the filtered list is fetched once per session rather than on every request.
+
+MCP servers are also ordered with Brave/Playwright **last** — local models have recency bias and reliably pick tools near the end of a long list.
+
+### Syncing after adding a new MCP
+
+When you add a new MCP server to `MCP_REGISTRY` in `config.py`, run:
+
+```bash
+# Dry-run: see what would change
+uv run scripts/update_tools_config.py
+
+# Write changes (new server added; descriptions refreshed on all servers)
+uv run scripts/update_tools_config.py --write
+
+# Also pull in newly available tools on existing servers
+uv run scripts/update_tools_config.py --write --add-new
+```
+
+**Merge rules:**
+
+| Situation | Behaviour |
+|---|---|
+| New server in `MCP_REGISTRY` | Added to `TOOL_CONFIG` with `None` (all tools) |
+| Existing entry = `None` | Unchanged |
+| Tool removed from MCP server | Pruned from allowlist |
+| New tool on existing server | Reported only — not added unless `--add-new` |
+| Server missing from registry | Warning printed, config left intact |
+
+### Adding a new MCP server (full checklist)
+
+1. Add the params dict in `config.py` (e.g. `_mytool_mcp_params = {...}`)
+2. Register it in `MCP_REGISTRY`: `"mytool": {"params": _mytool_mcp_params, "timeout": 60}`
+3. Wire it into `mcp_stack` with `tool_filter=make_tool_filter("mytool")`
+4. Run `uv run scripts/update_tools_config.py --write` to populate `TOOL_CONFIG` with all tools and their descriptions
+5. Delete lines in `tools_config.py` for tools you don't need — the inline descriptions make it easy to decide
+
 ## Prerequisites
 
 | Dependency | Purpose |
@@ -83,7 +158,7 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 | **[uv](https://docs.astral.sh/uv/)** | Python package manager |
 | **Go** | WhatsApp bridge |
 | **[Ollama](https://ollama.com)** | Local LLM inference |
-| **Node.js / npm** | Brave Search MCP, Workspace MCP |
+| **Node.js / npm** | Brave Search MCP, Workspace MCP, Playwright MCP |
 
 ## Setup
 
@@ -159,7 +234,8 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 ├── agent/                    # Python agent server
 │   ├── agent.py              # Entry point — dispatches to server or test UI
 │   ├── server.py             # Unix domain socket server, starts schedulers
-│   ├── config.py             # Environment config, model/MCP singletons
+│   ├── config.py             # Environment config, model/MCP singletons, MCP_REGISTRY
+│   ├── tools_config.py       # Per-server tool allowlists (TOOL_CONFIG)
 │   ├── agent_factory.py      # LRU-cached Agent instances + reminder parser
 │   ├── message_handler.py    # Core message routing (hooks, commands, AI)
 │   ├── command_handlers.py   # #briefing and #reminder command handlers
@@ -172,6 +248,8 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 │   ├── models.py             # Data models (ReceivedMessage, ReminderParsed)
 │   ├── logging_setup.py      # Logging config + deque for test UI log stream
 │   └── test_ui.py            # Gradio test mode UI
+├── scripts/
+│   └── update_tools_config.py  # Sync tools_config.py from live MCP tool lists
 ├── whatsapp-mcp/             # Forked WhatsApp MCP project
 │   ├── whatsapp-bridge/      # Go bridge (whatsmeow + SQLite)
 │   └── whatsapp-mcp-server/  # Python MCP server for WhatsApp tools

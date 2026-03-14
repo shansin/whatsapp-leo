@@ -79,23 +79,40 @@ _garmin_mcp_params = {
     "command": "uvx",
     "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
 }
+_playwright_mcp_params = {
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp@latest"],
+    "env": _shared_env,
+}
+
+# ── MCP registry ─────────────────────────────────────────────────────────────
+# Single source of truth for all configured MCP servers.
+# Used by mcp_stack (runtime) and update_tools_config.py (tool discovery).
+# Add new servers here when you add them to mcp_stack below.
+MCP_REGISTRY: dict[str, dict] = {
+    "workspace": {"params": _workspace_mcp_params, "timeout": 300},
+    "garmin":    {"params": _garmin_mcp_params,    "timeout": 120},
+    "playwright": {"params": _playwright_mcp_params, "timeout": 30},
+    "brave":     {"params": _brave_mcp_params,     "timeout": 30},
+}
 
 
 @asynccontextmanager
 async def mcp_stack(is_privileged: bool = False):
     """Async context manager that starts and yields configured MCP servers.
 
-    Always starts Brave search MCP. If is_privileged, also starts workspace
-    MCP (if available) and Garmin MCP.
+    Always starts Brave search and Playwright MCPs. If is_privileged, also
+    starts workspace MCP (if available) and Garmin MCP.
+
+    Tool exposure is controlled by tools_config.py — edit the allowlists there
+    to change which tools each server exposes to the LLM.
     """
     from contextlib import AsyncExitStack
     from agents.mcp import MCPServerStdio
+    from tools_config import make_tool_filter
 
     async with AsyncExitStack() as stack:
-        brave = await stack.enter_async_context(
-            MCPServerStdio(params=_brave_mcp_params, client_session_timeout_seconds=30)
-        )
-        servers = [brave]
+        servers = []
 
         if is_privileged:
             if WORKSPACE_MCP_PATH and os.path.exists(WORKSPACE_MCP_PATH):
@@ -103,6 +120,8 @@ async def mcp_stack(is_privileged: bool = False):
                     MCPServerStdio(
                         params=_workspace_mcp_params,
                         client_session_timeout_seconds=300,
+                        tool_filter=make_tool_filter("workspace"),
+                        cache_tools_list=True,
                     )
                 )
                 servers.append(ws)
@@ -113,8 +132,30 @@ async def mcp_stack(is_privileged: bool = False):
                 MCPServerStdio(
                     params=_garmin_mcp_params,
                     client_session_timeout_seconds=120,
+                    tool_filter=make_tool_filter("garmin"),
+                    cache_tools_list=True,
                 )
             )
             servers.append(garmin)
+
+        # Brave and Playwright come last so the model's recency bias works in our favor
+        # (with many tools from workspace+garmin, models tend to ignore early-listed tools)
+        playwright = await stack.enter_async_context(
+            MCPServerStdio(
+                params=_playwright_mcp_params,
+                client_session_timeout_seconds=30,
+                tool_filter=make_tool_filter("playwright"),
+                cache_tools_list=True,
+            )
+        )
+        brave = await stack.enter_async_context(
+            MCPServerStdio(
+                params=_brave_mcp_params,
+                client_session_timeout_seconds=30,
+                tool_filter=make_tool_filter("brave"),
+                cache_tools_list=True,
+            )
+        )
+        servers.extend([playwright, brave])
 
         yield servers

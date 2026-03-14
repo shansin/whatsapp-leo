@@ -3,10 +3,9 @@ whatsapp.log
 .env
 agent/__pycache__/
 whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
-whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
 whatsapp-mcp/whatsapp-bridge/whatsapp-client
 store/briefings.db-shm
 store/briefings.db-wal
 store/reminders.db-shm
 store/reminders.db-wal
-whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+scripts/__pycache__/update_tools_config.cpython-313.pyc
