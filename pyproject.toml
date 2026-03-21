@@ -171,4 +171,6 @@ dependencies = [
     "yt-dlp==2025.12.8",
     "zipp==3.23.0",
     "gradio>=6.6.0",
+    "twikit>=2.3.0",
+    "secretstorage>=3.5.0",
 ]

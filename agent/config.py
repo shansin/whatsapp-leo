@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from agents import OpenAIChatCompletionsModel
+from agents import OpenAIChatCompletionsModel, ModelSettings
 
 # Ensure logging is configured before anything else
 from logging_setup import logger  # noqa: F401
@@ -36,6 +36,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
+CONTEXT_SIZE = os.getenv("CONTEXT_SIZE")
 
 # ── Sender / access control ─────────────────────────────────────────────────
 ALLOWED_SENDERS = [
@@ -53,9 +54,21 @@ MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "10485760"))
 
 # MCP Server Paths
 WORKSPACE_MCP_PATH = os.getenv("WORKSPACE_MCP_PATH")
+X_MCP_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "x-mcp",
+    "x-mcp-server",
+    "main.py",
+)
 
 # ── Cached singletons (avoid re-creation per message) ───────────────────────
 _openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+
+_model_settings = ModelSettings()
+if CONTEXT_SIZE:
+    _model_settings.extra_body = {"num_ctx": int(CONTEXT_SIZE)}
+
 _cached_model = OpenAIChatCompletionsModel(
     model=MODEL_NAME, openai_client=_openai_client
 )
@@ -79,9 +92,9 @@ _garmin_mcp_params = {
     "command": "uvx",
     "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
 }
-_playwright_mcp_params = {
-    "command": "npx",
-    "args": ["-y", "@playwright/mcp@latest"],
+_x_mcp_params = {
+    "command": "uv",
+    "args": ["run", "python", X_MCP_PATH],
     "env": _shared_env,
 }
 
@@ -92,7 +105,7 @@ _playwright_mcp_params = {
 MCP_REGISTRY: dict[str, dict] = {
     "workspace": {"params": _workspace_mcp_params, "timeout": 300},
     "garmin":    {"params": _garmin_mcp_params,    "timeout": 120},
-    "playwright": {"params": _playwright_mcp_params, "timeout": 30},
+    "x":         {"params": _x_mcp_params,         "timeout": 60},
     "brave":     {"params": _brave_mcp_params,     "timeout": 30},
 }
 
@@ -101,8 +114,8 @@ MCP_REGISTRY: dict[str, dict] = {
 async def mcp_stack(is_privileged: bool = False):
     """Async context manager that starts and yields configured MCP servers.
 
-    Always starts Brave search and Playwright MCPs. If is_privileged, also
-    starts workspace MCP (if available) and Garmin MCP.
+    Always starts Brave search MCP. If is_privileged, also starts workspace
+    MCP (if available) and Garmin MCP.
 
     Tool exposure is controlled by tools_config.py — edit the allowlists there
     to change which tools each server exposes to the LLM.
@@ -138,16 +151,18 @@ async def mcp_stack(is_privileged: bool = False):
             )
             servers.append(garmin)
 
-        # Brave and Playwright come last so the model's recency bias works in our favor
-        # (with many tools from workspace+garmin, models tend to ignore early-listed tools)
-        playwright = await stack.enter_async_context(
-            MCPServerStdio(
-                params=_playwright_mcp_params,
-                client_session_timeout_seconds=30,
-                tool_filter=make_tool_filter("playwright"),
-                cache_tools_list=True,
+            x = await stack.enter_async_context(
+                MCPServerStdio(
+                    params=_x_mcp_params,
+                    client_session_timeout_seconds=60,
+                    tool_filter=make_tool_filter("x"),
+                    cache_tools_list=True,
+                )
             )
-        )
+            servers.append(x)
+
+        # Brave comes last so the model's recency bias works in our favor
+        # (with many tools from workspace+garmin, models tend to ignore early-listed tools)
         brave = await stack.enter_async_context(
             MCPServerStdio(
                 params=_brave_mcp_params,
@@ -156,6 +171,6 @@ async def mcp_stack(is_privileged: bool = False):
                 cache_tools_list=True,
             )
         )
-        servers.extend([playwright, brave])
+        servers.append(brave)
 
         yield servers

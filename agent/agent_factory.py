@@ -8,7 +8,7 @@ from dateutil import parser as dateutil_parser
 from agents import Agent, Runner, SQLiteSession
 from agents.mcp import MCPServerStdio
 
-from config import MAX_AGENTS, TTL_SECONDS, TZ, _cached_model
+from config import MAX_AGENTS, TTL_SECONDS, TZ, _cached_model, _model_settings
 from instructions import REMINDER_INSTRUCTIONS_TEMPLATE
 from models import ReminderParsed
 from logging_setup import logger
@@ -57,7 +57,7 @@ class AgentFactory:
 
         # Create new agent and session
         agent = Agent(
-            name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model
+            name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model, model_settings=_model_settings
         )
         session = SQLiteSession(chat_jid)
         self._agents[chat_jid] = (agent, mcp_servers, session, current_time)
@@ -76,6 +76,7 @@ _reminder_parser_agent = Agent(
     name="ReminderParser",
     instructions="",  # set dynamically before each run
     model=_cached_model,
+    model_settings=_model_settings,
     output_type=ReminderParsed,
 )
 

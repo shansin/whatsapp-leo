@@ -191,3 +191,7 @@ def start_test_ui():
         await recurring_scheduler.run()
 
     asyncio.run(run_schedulers())
+
+
+if __name__ == "__main__":
+    start_test_ui()

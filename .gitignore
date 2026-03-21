@@ -8,4 +8,5 @@ store/briefings.db-shm
 store/briefings.db-wal
 store/reminders.db-shm
 store/reminders.db-wal
-scripts/__pycache__/update_tools_config.cpython-313.pyc
+scripts/__pycache__/
+x-mcp/x-mcp-server/__pycache__/

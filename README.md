@@ -1,6 +1,6 @@
 # 🦁 WhatsApp Leo
 
-A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, browse pages, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, and bridge messages to external programs through named-pipe hooks.
+A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, read X/Twitter feeds, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, and bridge messages to external programs through named-pipe hooks.
 
 ## Architecture
 
@@ -8,11 +8,10 @@ A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://
 ┌──────────────┐  Unix Socket   ┌──────────────────┐   MCP (stdio)   ┌───────────────────────┐
 │  Go WhatsApp │◄──────────────►│  Python Agent    │◄───────────────►│  MCP Servers           │
 │  Bridge      │                │  Server          │                 │  • Brave Search        │
-│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • Playwright Browser  │
+│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • X (Twitter)         │
 └──────────────┘                └──────────────────┘                 │  • Google Workspace    │
        │                               │                             │  • Garmin Connect      │
-       │                               │                             └───────────────────────┘
-  WhatsApp Web API              ┌──────┴──────┐
+  WhatsApp Web API              ┌──────┴──────┐                      └───────────────────────┘
                                 │  SQLite DBs │
                                 │  • messages │
                                 │  • reminders│
@@ -32,21 +31,6 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - General knowledge Q&A powered by your chosen Ollama model
 - WhatsApp-native formatting (bold, italic, lists, quotes)
 - Per-chat conversation memory via `SQLiteSession`
-
-### 🔍 Web Search & Browsing
-- Real-time web search via **Brave Search** MCP server
-- Full browser automation via **Playwright** — navigate URLs, click, fill forms, take screenshots, extract page content
-
-### 📎 Google Workspace *(privileged users)*
-- **Google Docs** — create, read, update, move
-- **Google Drive** — find/create folders, search files
-- **Google Calendar** — list events, create/update/delete, find free time
-- **Google Sheets** — read content, get ranges, metadata
-- **Google Slides** — read text, find presentations
-- **Gmail** — search threads, draft/send emails, manage labels
-
-### 🏃 Garmin Connect *(privileged users)*
-- Access fitness and health data from Garmin devices (sleep, activities, etc.)
 
 ### ⏰ Reminders
 - **One-shot** — `#remindme in 30 minutes call dentist` — parsed by a dedicated AI agent into a precise datetime, stored in SQLite, and fired by a background scheduler
@@ -72,50 +56,163 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - All background schedulers (reminders, briefings) still run
 
 ### 🔒 Access Control
-- `ALLOWED_SENDERS` whitelist — only listed phone numbers get privileged features (Google Workspace, Garmin, reminders, briefings)
+- `ALLOWED_SENDERS` whitelist — only listed phone numbers get privileged features (Google Workspace, Garmin, X, reminders, briefings)
 - Non-privileged users can still chat and use web search
 - Dedicated-number mode (`IS_DEDICATED_NUMBER=true`) responds to all DMs; in shared-number mode Leo only responds when mentioned (`@leo` / `#leo`)
 
+## MCP Servers & Tools
+
+Leo connects to MCP servers over stdio. Tool exposure is controlled by an allowlist in `agent/tools_config.py` — only the tools listed below are visible to the model. Brave is listed **last** so local models (which have recency bias) reliably find web tools even when many others are present.
+
+### 🔍 Brave Search — all users
+
+Web search via the [Brave Search API](https://brave.com/search/api/). All tools exposed (allowlist = `None`).
+
+| Tool | Description |
+|---|---|
+| `brave_web_search` | Real-time web search |
+| `brave_local_search` | Location-aware local business/place search |
+
+### 📅 Google Workspace — privileged users
+
+Calendar, Gmail, and auth tools via the [Workspace MCP](https://github.com/gemini-cli-extensions/workspace).
+
+**Calendar**
+
+| Tool | Description |
+|---|---|
+| `calendar.list` | List all calendars |
+| `calendar.listEvents` | List events from a calendar (defaults to upcoming) |
+| `calendar.getEvent` | Get details of a specific event |
+| `calendar.createEvent` | Create a new calendar event |
+| `calendar.updateEvent` | Update an existing event |
+| `calendar.deleteEvent` | Delete an event |
+| `calendar.findFreeTime` | Find a free time slot across multiple people |
+| `calendar.respondToEvent` | Accept, decline, or mark tentative for a meeting invite |
+
+**Gmail**
+
+| Tool | Description |
+|---|---|
+| `gmail.search` | Search emails using Gmail query syntax |
+| `gmail.get` | Get the full content of a specific email |
+| `gmail.createDraft` | Create a draft email |
+| `gmail.downloadAttachment` | Download an attachment to a local file |
+
+**Auth**
+
+| Tool | Description |
+|---|---|
+| `auth.clear` | Clear credentials, forcing re-login on next request |
+| `auth.refreshToken` | Manually trigger token refresh |
+
+### 🏃 Garmin Connect — privileged users
+
+Fitness and health data via [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp).
+
+**Daily stats & body**
+
+| Tool | Description |
+|---|---|
+| `get_stats` | Daily activity stats (curated essential metrics) |
+| `get_user_summary` | User summary (compatible with garminconnect-ha) |
+| `get_stats_and_body` | Stats and body composition combined |
+| `get_body_composition` | Body composition for a date or range |
+| `get_weigh_ins` | Weight measurements between dates |
+| `get_fitnessage_data` | Fitness age |
+| `get_user_profile` | User profile information |
+
+**Sleep**
+
+| Tool | Description |
+|---|---|
+| `get_sleep_data` | Full sleep data with all details |
+| `get_sleep_summary` | Sleep summary (lightweight, essential metrics only) |
+
+**Heart rate & HRV**
+
+| Tool | Description |
+|---|---|
+| `get_heart_rates` | Full heart rate time-series |
+| `get_heart_rates_summary` | Heart rate summary (lightweight) |
+| `get_hrv_data` | Heart Rate Variability data |
+| `get_rhr_day` | Resting heart rate |
+
+**Stress & recovery**
+
+| Tool | Description |
+|---|---|
+| `get_stress_data` | Full stress time-series |
+| `get_stress_summary` | Stress summary (lightweight) |
+| `get_body_battery` | Body battery with events |
+| `get_body_battery_events` | Body battery events |
+| `get_training_readiness` | Training readiness score |
+| `get_training_status` | Training status |
+| `get_all_day_stress` | All-day stress data |
+| `get_weekly_stress` | Weekly stress aggregates |
+
+**Steps & activity**
+
+| Tool | Description |
+|---|---|
+| `get_steps_data` | Detailed steps with 15-minute intervals |
+| `get_daily_steps` | Steps for a date range |
+| `get_weekly_steps` | Weekly step aggregates |
+| `get_floors` | Floors climbed |
+| `get_weekly_intensity_minutes` | Weekly intensity minutes |
+| `get_all_day_events` | Daily wellness events |
+
+**Activities**
+
+| Tool | Description |
+|---|---|
+| `get_activities` | Activities with pagination |
+| `get_activity` | Basic activity info |
+| `get_activities_by_date` | Activities between dates, optionally filtered by type |
+| `count_activities` | Total activity count |
+| `get_activity_types` | All available activity types |
+| `get_activity_hr_in_timezones` | Heart rate in time zones for an activity |
+| `get_activity_split_summaries` | Split summaries for an activity |
+| `get_activity_splits` | Splits for an activity |
+| `get_activity_typed_splits` | Typed splits for an activity |
+| `get_activity_weather` | Weather data for an activity |
+| `get_training_effect` | Training effect for an activity |
+
+**Training & performance**
+
+| Tool | Description |
+|---|---|
+| `get_endurance_score` | Endurance score between dates |
+| `get_hill_score` | Hill score between dates |
+| `get_lactate_threshold` | Lactate threshold data |
+| `get_personal_record` | Personal records |
+| `get_race_predictions` | Predicted race times based on current fitness |
+| `get_respiration_data` | Full respiration time-series |
+| `get_respiration_summary` | Respiration summary (lightweight) |
+| `get_scheduled_workouts` | Scheduled workouts between two dates |
+| `get_training_plan_workouts` | Training plan workouts for the week |
+| `get_workouts` | All workouts (curated summary) |
+| `get_workout_by_id` | Detailed info for a specific workout |
+| `get_progress_summary_between_dates` | Progress summary for a metric between dates |
+
+### 🐦 X (Twitter) — privileged users
+
+Tweet fetching via [twikit](https://github.com/d60/twikit) (cookie-based, no API key required).
+
+| Tool | Description |
+|---|---|
+| `get_user_tweets` | Fetch recent tweets from any public account by username |
+| `search_tweets` | Search tweets by keyword, hashtag, or `from:username` syntax |
+
+---
+
 ## Tool Selection Framework
 
-With many MCP servers active, models can be overwhelmed by hundreds of tools and fail to pick the right one. Leo solves this with a per-server allowlist in **`agent/tools_config.py`**.
+With many MCP servers active, models can be overwhelmed by hundreds of tools. Leo uses a per-server allowlist in **`agent/tools_config.py`** to expose only what's needed.
 
-### How it works
+`make_tool_filter(server_name)` converts these lists into `MCPServerStdio(tool_filter=...)` calls that the SDK applies before handing tools to the model. `cache_tools_list=True` is set on every server so the filtered list is fetched once per session.
 
-`TOOL_CONFIG` maps each server name to either `None` (all tools) or an explicit allowlist. Every tool entry carries its description as an inline comment so you can read and trim the file without cross-referencing docs:
-
-```python
-# agent/tools_config.py
-TOOL_CONFIG: dict[str, list[str] | None] = {
-    "brave": None,   # only 2 tools — expose all
-
-    "playwright": [
-        "browser_navigate",          # Navigate to a URL
-        "browser_click",             # Perform click on a web page
-        "browser_take_screenshot",   # Take a screenshot of the current page
-        ...
-    ],
-
-    "workspace": [
-        "calendar.listEvents",       # Lists events from a calendar. Defaults to upcoming events.
-        "gmail.send",                # Send an email message.
-        "docs.find",                 # Finds Google Docs by searching for a query in their title.
-        ...
-    ],
-
-    "garmin": [
-        "get_sleep_data",            # Get full sleep data with all details
-        "get_stats",                 # Get daily activity stats with curated essential metrics
-        ...
-    ],
-}
-```
-
-To disable a tool, delete its line. The description tells you exactly what it does.
-
-`make_tool_filter(server_name)` converts these lists into `MCPServerStdio(tool_filter=...)` calls that the SDK applies before handing tools to the model. `cache_tools_list=True` is set on every server so the filtered list is fetched once per session rather than on every request.
-
-MCP servers are also ordered with Brave/Playwright **last** — local models have recency bias and reliably pick tools near the end of a long list.
+To disable a tool, delete or comment out its line in `tools_config.py`. The inline description tells you what it does.
 
 ### Syncing after adding a new MCP
 
@@ -158,7 +255,7 @@ uv run scripts/update_tools_config.py --write --add-new
 | **[uv](https://docs.astral.sh/uv/)** | Python package manager |
 | **Go** | WhatsApp bridge |
 | **[Ollama](https://ollama.com)** | Local LLM inference |
-| **Node.js / npm** | Brave Search MCP, Workspace MCP, Playwright MCP |
+| **Node.js / npm** | Brave Search MCP, Workspace MCP |
 
 ## Setup
 
@@ -197,6 +294,7 @@ Key variables:
 | `IS_HOOK_ENABLED` | Enable the hooks system | `false` |
 | `HOOKS` | Comma-separated hook names (e.g. `claude,codex`) | — |
 | `WORKSPACE_MCP_PATH` | Path to the Workspace MCP server `index.js` | — |
+| `X_COOKIE_PATH` | Path to the X (Twitter) session cookie file | `/tmp/x_cookies.json` |
 
 ### 3. Pull an Ollama model
 
@@ -204,7 +302,40 @@ Key variables:
 ollama pull qwen3.5:35b
 ```
 
-### 4. Start services
+### 4. Authenticate WhatsApp (first run only)
+
+The Go bridge uses WhatsApp's multidevice API and authenticates via QR code — no phone number or SIM is required on the server.
+
+```bash
+./start_services.sh
+```
+
+On **first run**, the bridge prints a QR code in the terminal. To link your WhatsApp account:
+
+1. Open WhatsApp on your phone
+2. Go to **Settings → Linked Devices → Link a Device**
+3. Scan the QR code shown in the terminal
+
+The session is persisted in SQLite (`whatsapp-mcp/whatsapp-bridge/`) so subsequent starts skip the QR step. If the session expires, delete the bridge's `.db` files and re-scan.
+
+### 5. Authenticate X/Twitter (first run only, privileged users only)
+
+The X MCP uses cookie-based auth via [twikit](https://github.com/d60/twikit). No API key or developer account required — just a Firefox session.
+
+1. Log in to [x.com](https://x.com) in Firefox or Chrome/Chromium
+2. Run the setup script — it reads cookies directly from your browser profile:
+
+```bash
+uv run python x-mcp/x-mcp-server/setup.py           # auto-detects Firefox then Chrome
+uv run python x-mcp/x-mcp-server/setup.py --firefox
+uv run python x-mcp/x-mcp-server/setup.py --chrome
+```
+
+Cookies are saved to `X_COOKIE_PATH` and loaded silently on every start — no credentials in `.env`.
+
+To re-authenticate (e.g. if cookies expire), log in to x.com in your browser and re-run the script.
+
+### 6. Start services
 
 ```bash
 ./start_services.sh
@@ -217,9 +348,7 @@ This script:
 4. Prints Unix socket paths and hook FIFO paths (if enabled)
 5. Handles graceful shutdown on `Ctrl+C`
 
-On first run the Go bridge will display a **QR code** — scan it with your WhatsApp mobile app to authenticate.
-
-### 5. Test mode (optional)
+### 7. Test mode (optional)
 
 ```bash
 IS_TEST_MODE=true ./start_services.sh
@@ -250,6 +379,10 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 │   └── test_ui.py            # Gradio test mode UI
 ├── scripts/
 │   └── update_tools_config.py  # Sync tools_config.py from live MCP tool lists
+├── x-mcp/                    # X (Twitter) MCP
+│   └── x-mcp-server/
+│       ├── main.py           # FastMCP server (get_user_tweets, search_tweets)
+│       └── setup.py          # One-time interactive login → saves cookies
 ├── whatsapp-mcp/             # Forked WhatsApp MCP project
 │   ├── whatsapp-bridge/      # Go bridge (whatsmeow + SQLite)
 │   └── whatsapp-mcp-server/  # Python MCP server for WhatsApp tools
