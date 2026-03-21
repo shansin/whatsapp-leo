@@ -21,6 +21,9 @@ from logging_setup import logger
 # Track background reader tasks so we can cancel on cleanup
 _reader_tasks: list[asyncio.Task] = []
 
+# Active hook sessions: chat_jid → hook_name
+_active_sessions: dict[str, str] = {}
+
 
 def _fifo_path(hook_name: str, direction: str) -> str:
     """Return the FIFO path for a given hook name and direction (in/out)."""
@@ -181,3 +184,45 @@ def match_hook(content: str) -> tuple[str, str] | None:
                     return name, rest.strip()
 
     return None
+
+
+def match_hook_session_command(content: str) -> tuple[str, str] | None:
+    """Check if message is a hook session start/stop command.
+
+    Matches '#hook-name #start' or '#hook-name #stop' (also with @).
+    Returns (hook_name, "start"|"stop") or None.
+    """
+    if not IS_HOOK_ENABLED or not HOOKS:
+        return None
+
+    stripped = content.strip()
+    for name in HOOKS:
+        for prefix_char in ("#", "@"):
+            prefix = f"{prefix_char}{name}"
+            if stripped.lower().startswith(prefix.lower()):
+                rest = stripped[len(prefix):].strip().lower()
+                if rest == "#start":
+                    return name, "start"
+                if rest == "#stop":
+                    return name, "stop"
+
+    return None
+
+
+def start_hook_session(chat_jid: str, hook_name: str) -> None:
+    """Enter hook session mode for a chat — all messages forwarded to hook."""
+    _active_sessions[chat_jid] = hook_name
+    logger.info(f"Hook session started: chat={chat_jid} hook={hook_name}")
+
+
+def stop_hook_session(chat_jid: str) -> str | None:
+    """Exit hook session mode for a chat. Returns the hook name or None."""
+    hook_name = _active_sessions.pop(chat_jid, None)
+    if hook_name:
+        logger.info(f"Hook session stopped: chat={chat_jid} hook={hook_name}")
+    return hook_name
+
+
+def get_hook_session(chat_jid: str) -> str | None:
+    """Return the active hook name for a chat, or None."""
+    return _active_sessions.get(chat_jid)

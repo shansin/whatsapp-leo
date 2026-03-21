@@ -20,7 +20,7 @@ from models import ReceivedMessage
 from agent_factory import agent_factory, parse_remindme_with_agent, TZ
 from command_handlers import handle_briefing_command, handle_reminder_command
 from reminder import validate_reminder_time, store_reminder
-from hooks import match_hook, write_to_hook
+from hooks import match_hook, match_hook_session_command, write_to_hook, start_hook_session, stop_hook_session, get_hook_session
 from logging_setup import logger
 
 
@@ -45,7 +45,22 @@ async def process_message(data: dict):
         logger.debug("Full message payload: %s", orjson.dumps(data).decode())
     message = ReceivedMessage.from_dict(data)
 
-    # ── Hook intercept ──────────────────────────
+    # ── Hook session start/stop ──────────────────
+    session_cmd = match_hook_session_command(message.content)
+    if session_cmd and message.phone_number in ALLOWED_SENDERS:
+        hook_name, action = session_cmd
+        if action == "start":
+            start_hook_session(message.chat_jid, hook_name)
+            await _reply(message, f"🔗 Hook session *{hook_name}* started. All messages will be forwarded. Send *#{hook_name} #stop* to end.")
+        else:
+            stopped = stop_hook_session(message.chat_jid)
+            if stopped:
+                await _reply(message, f"Hook session *{stopped}* ended. Regular processing resumed.")
+            else:
+                await _reply(message, "No active hook session to stop.")
+        return
+
+    # ── Hook intercept (single-message) ──────────
     hook_match = match_hook(message.content)
     if hook_match and message.phone_number in ALLOWED_SENDERS:
         hook_name, body = hook_match
@@ -109,6 +124,12 @@ async def process_message(data: dict):
         return
 
     if "#briefing" in message.content.lower():
+        return
+
+    # ── Active hook session forwarding ───────────
+    active_hook = get_hook_session(message.chat_jid)
+    if active_hook:
+        await write_to_hook(active_hook, message.content)
         return
 
     should_leo_respond = False
