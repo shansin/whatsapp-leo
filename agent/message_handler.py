@@ -1,6 +1,8 @@
 """Core message processing for WhatsApp Leo agent."""
 
 import asyncio
+import os
+import sqlite3
 from dataclasses import asdict
 from datetime import datetime
 
@@ -22,6 +24,32 @@ from command_handlers import handle_briefing_command, handle_reminder_command
 from reminder import validate_reminder_time, store_reminder
 from hooks import match_hook, match_hook_session_command, write_to_hook, start_hook_session, stop_hook_session, get_hook_session
 from logging_setup import logger
+
+
+_MESSAGES_DB = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "store", "messages.db"
+)
+
+
+def _lookup_quoted_message(message_id: str, chat_jid: str) -> tuple[str, str]:
+    """Look up a quoted message's content and sender from the messages DB.
+
+    Returns (content, sender) or ("", "") if not found.
+    """
+    try:
+        conn = sqlite3.connect(_MESSAGES_DB)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT content, sender FROM messages WHERE id = ? AND chat_jid = ?",
+            (message_id, chat_jid),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return row[0] or "", row[1] or ""
+    except Exception:
+        pass
+    return "", ""
 
 
 def format_leo_response(text: str) -> str:
@@ -71,11 +99,20 @@ async def process_message(data: dict):
         "#leo" in message.content.lower() or "@leo" in message.content.lower()
     )
 
+    # ── Enrich quoted message from DB if proto didn't embed content ──
+    if message.quoted_message_id and not message.quoted_message_content:
+        db_content, db_sender = _lookup_quoted_message(
+            message.quoted_message_id, message.chat_jid
+        )
+        if db_content:
+            message.quoted_message_content = db_content
+        if db_sender and not message.quoted_message_sender:
+            message.quoted_message_sender = db_sender
+
     # ── Handle #remindme ─────────────────────────
     if (
-        IS_DEDICATED_NUMBER
-        and ("#remindme" in message.content.lower())
-        and (message.phone_number in ALLOWED_SENDERS)
+        "#remindme" in message.content.lower()
+        and message.phone_number in ALLOWED_SENDERS
     ):
         try:
             remind_at, original_msg = await parse_remindme_with_agent(message.content)
@@ -104,8 +141,7 @@ async def process_message(data: dict):
 
     # ── Handle #reminder commands ─────────────────────────
     if (
-        IS_DEDICATED_NUMBER
-        and "#reminder" in message.content.lower()
+        "#reminder" in message.content.lower()
         and message.phone_number in ALLOWED_SENDERS
     ):
         await handle_reminder_command(message)
@@ -116,8 +152,7 @@ async def process_message(data: dict):
 
     # ── Handle #briefing commands ─────────────────────────
     if (
-        IS_DEDICATED_NUMBER
-        and "#briefing" in message.content.lower()
+        "#briefing" in message.content.lower()
         and message.phone_number in ALLOWED_SENDERS
     ):
         await handle_briefing_command(message)

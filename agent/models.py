@@ -21,6 +21,9 @@ class ReceivedMessage:
     sender_jid: str
     timestamp: str
     url: str
+    quoted_message_id: str
+    quoted_message_sender: str
+    quoted_message_content: str
 
     @classmethod
     def from_dict(cls, data: dict) -> "ReceivedMessage":
@@ -38,6 +41,9 @@ class ReceivedMessage:
             sender_jid=data.get("sender_jid", ""),
             timestamp=data.get("timestamp", ""),
             url=data.get("url", ""),
+            quoted_message_id=data.get("quoted_message_id", ""),
+            quoted_message_sender=data.get("quoted_message_sender", ""),
+            quoted_message_content=data.get("quoted_message_content", ""),
         )
 
 

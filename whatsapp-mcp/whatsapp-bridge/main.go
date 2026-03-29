@@ -200,6 +200,27 @@ func extractTextContent(msg *waProto.Message) string {
 	return ""
 }
 
+// extractQuotedMessage extracts quoted/replied-to message info from ContextInfo
+func extractQuotedMessage(msg *waProto.Message) (stanzaID string, participant string, quotedText string) {
+	if msg == nil {
+		return "", "", ""
+	}
+	extendedText := msg.GetExtendedTextMessage()
+	if extendedText == nil {
+		return "", "", ""
+	}
+	ctx := extendedText.GetContextInfo()
+	if ctx == nil {
+		return "", "", ""
+	}
+	stanzaID = ctx.GetStanzaID()
+	participant = ctx.GetParticipant()
+	if quoted := ctx.GetQuotedMessage(); quoted != nil {
+		quotedText = extractTextContent(quoted)
+	}
+	return stanzaID, participant, quotedText
+}
+
 // SendMessageResponse represents the response for the send message API
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
@@ -535,21 +556,27 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			}
 		}
 
+		// Extract quoted/replied-to message context
+		quotedID, quotedSender, quotedContent := extractQuotedMessage(msg.Message)
+
 		// Send message details as POST to localhost:8081
 		messageData := map[string]interface{}{
-			"id":           msg.Info.ID,
-			"chat_jid":     chatJID,
-			"chat_name":    name,
-			"sender":       sender,
-			"sender_jid":   msg.Info.Sender.String(),
-			"phone_number": phoneNumber,
-			"content":      content,
-			"timestamp":    msg.Info.Timestamp.Format(time.RFC3339),
-			"is_from_me":   msg.Info.IsFromMe,
-			"media_type":   mediaType,
-			"filename":     filename,
-			"url":          url,
-			"file_length":  fileLength,
+			"id":                     msg.Info.ID,
+			"chat_jid":              chatJID,
+			"chat_name":             name,
+			"sender":                sender,
+			"sender_jid":            msg.Info.Sender.String(),
+			"phone_number":          phoneNumber,
+			"content":               content,
+			"timestamp":             msg.Info.Timestamp.Format(time.RFC3339),
+			"is_from_me":            msg.Info.IsFromMe,
+			"media_type":            mediaType,
+			"filename":              filename,
+			"url":                   url,
+			"file_length":           fileLength,
+			"quoted_message_id":     quotedID,
+			"quoted_message_sender": quotedSender,
+			"quoted_message_content": quotedContent,
 		}
 
 		jsonData, jsonErr := json.Marshal(messageData)
