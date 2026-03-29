@@ -1,6 +1,6 @@
 # 🦁 WhatsApp Leo
 
-A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, read X/Twitter feeds, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, and bridge messages to external programs through named-pipe hooks.
+A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, read X/Twitter feeds, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, understand voice notes and images, and bridge messages to external programs through named-pipe hooks.
 
 ## Architecture
 
@@ -31,6 +31,17 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - General knowledge Q&A powered by your chosen Ollama model
 - WhatsApp-native formatting (bold, italic, lists, quotes)
 - Per-chat conversation memory via `SQLiteSession`
+- **Quoted message context** — when replying to a message, Leo retrieves the quoted message (text, image, or audio) from the database and includes it as context for the response
+
+### 🖼️ Vision (Multimodal)
+- Send or reply-to an image and Leo will analyze it using a dedicated vision model (configurable via `VISION_MODEL_NAME`, default: `gemma3:27b`)
+- Images are automatically downscaled to `MAX_IMAGE_DIMENSION` (default: 1280px) and JPEG-encoded before being sent to the model
+- Vision and text agents are cached separately per chat (keyed by model name) so switching between them doesn't break session history
+
+### 🎤 Voice Notes (Audio Transcription)
+- Send or reply-to a voice note and Leo will transcribe it using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (local Whisper inference, auto-detects CPU or CUDA)
+- The transcript is injected into the message content and processed through the normal AI pipeline
+- Model size configurable via `WHISPER_MODEL_SIZE` (default: `medium`; options: tiny, base, small, medium, large)
 
 ### ⏰ Reminders
 - **One-shot** — `#remindme in 30 minutes call dentist` — parsed by a dedicated AI agent into a precise datetime, stored in SQLite, and fired by a background scheduler
@@ -47,7 +58,8 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - Route WhatsApp messages to external programs and receive responses back
 - Each hook creates two FIFOs: `{name}-in.fifo` (WhatsApp → program) and `{name}-out.fifo` (program → WhatsApp)
 - Trigger with `#hook-name message` or `@hook-name message`
-- Example hooks: `claude`, `codex`
+- **Session mode** — `#hook-name #start` enters a persistent session where all subsequent messages from that chat are forwarded to the hook (no prefix needed). `#hook-name #stop` ends the session and resumes normal Leo processing
+- Example hooks: `claude`, `claude-session`
 
 ### 🧪 Test Mode
 - Local **Gradio** chat UI at `http://127.0.0.1:7860` that bypasses the WhatsApp bridge
@@ -256,32 +268,41 @@ uv run scripts/update_tools_config.py --write --add-new
 | **Go** | WhatsApp bridge |
 | **[Ollama](https://ollama.com)** | Local LLM inference |
 | **Node.js / npm** | Brave Search MCP, Workspace MCP |
+| **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** | Voice note transcription (installed via `uv sync`) |
 
 ## Setup
 
-### 1. Clone & install Python dependencies
+### Quick start
 
 ```bash
-git clone <repo-url>
-cd whatsapp-leo-dedicated-number
-uv sync
+git clone https://github.com/shansin/whatsapp-leo.git
+cd whatsapp-leo
+./setup.sh
 ```
 
-### 2. Configure environment
+`setup.sh` is a one-shot interactive installer that:
 
-Copy the example and fill in your values:
+1. Checks all system dependencies (Python 3.13+, uv, Go, Node.js, Ollama)
+2. Installs Python packages (`uv sync`) and builds the Go bridge
+3. Downloads and installs the [Google Workspace MCP](#-google-workspace--privileged-users) as a sibling directory (`../linux.google-workspace-extension`)
+4. Pulls the default Ollama models (`qwen3.5:35b`, `gemma3:27b`)
+5. Walks you through `.env` configuration interactively (API keys, phone numbers, model choices)
+6. Offers to authenticate X/Twitter on the spot
+7. Explains how each remaining service authenticates on first use
 
-```bash
-cp .env_example .env
-```
+Every value can be changed later by editing `.env` directly.
 
-Key variables:
+### Environment variables
 
 | Variable | Description | Default |
 |---|---|---|
 | `INSTANCE_GUID` | Unique ID for this instance (allows multiple instances) | `default` |
 | `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:11434/v1` |
 | `MODEL_NAME` | Ollama model to use (e.g. `qwen3.5:35b`) | — |
+| `VISION_MODEL_NAME` | Ollama model for image messages | `gemma3:27b` |
+| `MAX_IMAGE_DIMENSION` | Max pixel dimension before downscaling images | `1280` |
+| `WHISPER_MODEL_SIZE` | faster-whisper model size for audio transcription (tiny/base/small/medium/large) | `medium` |
+| `CONTEXT_SIZE` | Context window size (tokens) | `32768` |
 | `MAX_AGENTS` | Max cached agent instances (LRU eviction) | `20` |
 | `TTL_SECONDS` | Agent cache TTL | `1800` |
 | `ALLOWED_SENDERS` | Comma-separated phone numbers for privileged access | — |
@@ -290,40 +311,60 @@ Key variables:
 | `IS_TEST_MODE` | `true` to launch Gradio UI instead of WhatsApp bridge | `false` |
 | `OPENAI_API_KEY` | Required by the OpenAI Agents SDK (can be a dummy value for Ollama) | — |
 | `BRAVE_API_KEY` | API key for Brave Search | — |
-| `REMINDER_POLL_INTERVAL` | Seconds between reminder scheduler polls | `60` |
+| `REMINDER_POLL_INTERVAL` | Seconds between reminder scheduler polls | `30` |
 | `IS_HOOK_ENABLED` | Enable the hooks system | `false` |
-| `HOOKS` | Comma-separated hook names (e.g. `claude,codex`) | — |
-| `WORKSPACE_MCP_PATH` | Path to the Workspace MCP server `index.js` | — |
+| `HOOKS` | Comma-separated hook names (e.g. `claude,claude-session`) | — |
+| `WORKSPACE_MCP_PATH` | Path to the Workspace MCP server `dist/index.js` | — |
 | `X_COOKIE_PATH` | Path to the X (Twitter) session cookie file | `/tmp/x_cookies.json` |
 
-### 3. Pull an Ollama model
+### Service authentication
 
-```bash
-ollama pull qwen3.5:35b
-```
+Each MCP service authenticates independently. `setup.sh` handles or explains all of these, but here's the full reference:
 
-### 4. Authenticate WhatsApp (first run only)
+#### WhatsApp (QR code — first run)
 
 The Go bridge uses WhatsApp's multidevice API and authenticates via QR code — no phone number or SIM is required on the server.
 
-```bash
-./start_services.sh
-```
-
-On **first run**, the bridge prints a QR code in the terminal. To link your WhatsApp account:
-
-1. Open WhatsApp on your phone
-2. Go to **Settings → Linked Devices → Link a Device**
-3. Scan the QR code shown in the terminal
+1. Run `./start_services.sh`
+2. On **first run**, the bridge prints a QR code in the terminal
+3. Open WhatsApp on your phone → **Settings → Linked Devices → Link a Device**
+4. Scan the QR code
 
 The session is persisted in SQLite (`whatsapp-mcp/whatsapp-bridge/`) so subsequent starts skip the QR step. If the session expires, delete the bridge's `.db` files and re-scan.
 
-### 5. Authenticate X/Twitter (first run only, privileged users only)
+#### Google Workspace (OAuth — first use)
 
-The X MCP uses cookie-based auth via [twikit](https://github.com/d60/twikit). No API key or developer account required — just a Firefox session.
+The Workspace MCP is downloaded by `setup.sh` from [gemini-cli-extensions/workspace](https://github.com/gemini-cli-extensions/workspace/releases) into `../linux.google-workspace-extension` (sibling to the Leo directory). The path is auto-configured in `.env` as `WORKSPACE_MCP_PATH`.
+
+To set up manually instead:
+
+```bash
+# Download the latest release (Linux example)
+mkdir -p ../linux.google-workspace-extension
+curl -fsSL https://github.com/gemini-cli-extensions/workspace/releases/latest/download/linux.google-workspace-extension.tar.gz \
+  | tar xz -C ../linux.google-workspace-extension
+cd ../linux.google-workspace-extension && npm install
+```
+
+Then set in `.env`:
+```
+WORKSPACE_MCP_PATH=<absolute-path-to>/linux.google-workspace-extension/dist/index.js
+```
+
+On **first use**, the Workspace MCP opens your browser for Google OAuth consent. Tokens are stored locally in `gemini-cli-workspace-token.json` inside the extension directory and refreshed automatically.
+
+#### Garmin Connect (interactive login — first use)
+
+The Garmin MCP server runs via `uvx git+https://github.com/Taxuspt/garmin_mcp` — no env vars or API keys needed. On **first use**, it prompts interactively for your Garmin credentials. OAuth tokens are stored in `~/.garminconnect/` and refreshed automatically on subsequent starts.
+
+To re-authenticate (e.g. if tokens expire), delete `~/.garminconnect/` and restart Leo.
+
+#### X / Twitter (browser cookies — one-time)
+
+The X MCP uses cookie-based auth via [twikit](https://github.com/d60/twikit). No API key or developer account required — just a browser session.
 
 1. Log in to [x.com](https://x.com) in Firefox or Chrome/Chromium
-2. Run the setup script — it reads cookies directly from your browser profile:
+2. Run the setup script (or let `setup.sh` do it for you):
 
 ```bash
 uv run python x-mcp/x-mcp-server/setup.py           # auto-detects Firefox then Chrome
@@ -331,11 +372,9 @@ uv run python x-mcp/x-mcp-server/setup.py --firefox
 uv run python x-mcp/x-mcp-server/setup.py --chrome
 ```
 
-Cookies are saved to `X_COOKIE_PATH` and loaded silently on every start — no credentials in `.env`.
+Cookies are saved to `X_COOKIE_PATH` and loaded silently on every start. To re-authenticate, log in to x.com in your browser and re-run the script.
 
-To re-authenticate (e.g. if cookies expire), log in to x.com in your browser and re-run the script.
-
-### 6. Start services
+### Start services
 
 ```bash
 ./start_services.sh
@@ -348,7 +387,7 @@ This script:
 4. Prints Unix socket paths and hook FIFO paths (if enabled)
 5. Handles graceful shutdown on `Ctrl+C`
 
-### 7. Test mode (optional)
+### Test mode (optional)
 
 ```bash
 IS_TEST_MODE=true ./start_services.sh
@@ -366,7 +405,7 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 │   ├── config.py             # Environment config, model/MCP singletons, MCP_REGISTRY
 │   ├── tools_config.py       # Per-server tool allowlists (TOOL_CONFIG)
 │   ├── agent_factory.py      # LRU-cached Agent instances + reminder parser
-│   ├── message_handler.py    # Core message routing (hooks, commands, AI)
+│   ├── message_handler.py    # Core message routing (hooks, commands, AI, vision, audio)
 │   ├── command_handlers.py   # #briefing and #reminder command handlers
 │   ├── briefing.py           # Briefing persistence, scheduling, cron parsing
 │   ├── briefing_executor.py  # Executes briefing prompts through AI pipeline
@@ -410,3 +449,5 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 | `#briefing remove <id>` | Remove a briefing |
 | `#briefing remove-all` | Remove all briefings |
 | `#hook-name <message>` | Send message to a named hook |
+| `#hook-name #start` | Start a hook session — all messages forwarded to hook |
+| `#hook-name #stop` | End a hook session — resume normal Leo processing |
