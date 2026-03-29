@@ -173,4 +173,5 @@ dependencies = [
     "gradio>=6.6.0",
     "twikit>=2.3.0",
     "secretstorage>=3.5.0",
+    "faster-whisper>=1.2.1",
 ]

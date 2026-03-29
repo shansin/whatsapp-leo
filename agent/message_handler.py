@@ -21,6 +21,7 @@ from config import (
     MAX_IMAGE_DIMENSION,
     _cached_model,
     _cached_vision_model,
+    get_whisper_model,
     mcp_stack,
 )
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE, INSTRUCTIONS_BASIC_TEMPLATE
@@ -130,6 +131,31 @@ async def _build_vision_input(
             ],
         }
     ]
+
+
+def _transcribe_audio(file_path: str) -> str:
+    """Transcribe an audio file using faster-whisper. Returns transcript text."""
+    model = get_whisper_model()
+    segments, info = model.transcribe(file_path, beam_size=5)
+    transcript = " ".join(segment.text.strip() for segment in segments)
+    logger.info(f"Transcribed audio ({info.language}, {info.duration:.1f}s): {transcript[:100]}...")
+    return transcript
+
+
+async def _transcribe_audio_message(
+    audio_message_id: str, chat_jid: str
+) -> str | None:
+    """Download and transcribe an audio message. Returns transcript or None."""
+    file_path = await asyncio.to_thread(download_media, audio_message_id, chat_jid)
+    if not file_path:
+        logger.warning(f"Could not download audio for message {audio_message_id}")
+        return None
+
+    try:
+        return await asyncio.to_thread(_transcribe_audio, file_path)
+    except Exception as e:
+        logger.error(f"Failed to transcribe audio {file_path}: {e}", exc_info=True)
+        return None
 
 
 async def process_message(data: dict):
@@ -251,7 +277,7 @@ async def process_message(data: dict):
         # Check if sender is allowed to use privileged feature
         is_allowed = message.phone_number in ALLOWED_SENDERS
 
-        # ── Detect image: direct send or reply-to-image ──
+        # ── Detect media: image or audio (direct or reply-to) ──
         is_direct_image = message.media_type == "image"
         is_quoted_image = (
             not is_direct_image
@@ -261,6 +287,17 @@ async def process_message(data: dict):
         has_image = is_direct_image or is_quoted_image
         image_message_id = (
             message.id if is_direct_image else message.quoted_message_id
+        )
+
+        is_direct_audio = message.media_type == "audio"
+        is_quoted_audio = (
+            not is_direct_audio
+            and message.quoted_message_id != ""
+            and quoted_media_type == "audio"
+        )
+        has_audio = is_direct_audio or is_quoted_audio
+        audio_message_id = (
+            message.id if is_direct_audio else message.quoted_message_id
         )
 
         try:
@@ -274,6 +311,18 @@ async def process_message(data: dict):
                 else INSTRUCTIONS_BASIC_TEMPLATE
             )
             instructions = template.format(current_time=current_time)
+
+            # ── Transcribe audio if present (inject into message before serializing) ──
+            if has_audio:
+                transcript = await _transcribe_audio_message(
+                    audio_message_id, message.chat_jid
+                )
+                if transcript:
+                    message.content = (
+                        f"{message.content}\n\n[Audio transcript]: {transcript}"
+                        if message.content
+                        else f"[Audio transcript]: {transcript}"
+                    )
 
             text_payload = orjson.dumps(asdict(message)).decode()
 

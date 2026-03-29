@@ -80,6 +80,22 @@ _cached_vision_model = OpenAIChatCompletionsModel(
     model=VISION_MODEL_NAME, openai_client=_openai_client
 )
 
+# ── Audio transcription (faster-whisper, lazy-loaded) ──────────────────────
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
+_whisper_model = None
+
+
+def get_whisper_model():
+    """Lazy-load the faster-whisper model on first use."""
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+
+        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="auto")
+        logger.info(f"Loaded faster-whisper model: {WHISPER_MODEL_SIZE}")
+    return _whisper_model
+
+
 # Shared env copy (avoids copying 100+ vars per message)
 _shared_env = os.environ.copy()
 _shared_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"
