@@ -73,6 +73,13 @@ _cached_model = OpenAIChatCompletionsModel(
     model=MODEL_NAME, openai_client=_openai_client
 )
 
+# ── Vision model (for image processing) ────────────────────────────────────
+VISION_MODEL_NAME = os.getenv("VISION_MODEL_NAME", "gemma3:27b")
+MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "1280"))
+_cached_vision_model = OpenAIChatCompletionsModel(
+    model=VISION_MODEL_NAME, openai_client=_openai_client
+)
+
 # Shared env copy (avoids copying 100+ vars per message)
 _shared_env = os.environ.copy()
 _shared_env["GEMINI_CLI_WORKSPACE_FORCE_FILE_STORAGE"] = "true"

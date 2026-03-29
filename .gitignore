@@ -4,9 +4,6 @@ whatsapp.log
 agent/__pycache__/
 whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
 whatsapp-mcp/whatsapp-bridge/whatsapp-client
-store/briefings.db-shm
-store/briefings.db-wal
-store/reminders.db-shm
-store/reminders.db-wal
 scripts/__pycache__/
 x-mcp/x-mcp-server/__pycache__/
+store/*

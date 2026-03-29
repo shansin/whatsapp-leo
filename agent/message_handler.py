@@ -1,20 +1,26 @@
 """Core message processing for WhatsApp Leo agent."""
 
 import asyncio
+import base64
 import os
 import sqlite3
 from dataclasses import asdict
 from datetime import datetime
+from io import BytesIO
 
 import orjson
-from agents import Runner, trace
+from agents import RunConfig, Runner, trace
+from PIL import Image
 from whatsapp import send_message as whatsapp_send_message
+from whatsapp import download_media
 
 from config import (
     IS_DEDICATED_NUMBER,
     ALLOWED_SENDERS,
     LEO_MENTION_ID,
+    MAX_IMAGE_DIMENSION,
     _cached_model,
+    _cached_vision_model,
     mcp_stack,
 )
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE, INSTRUCTIONS_BASIC_TEMPLATE
@@ -31,25 +37,25 @@ _MESSAGES_DB = os.path.join(
 )
 
 
-def _lookup_quoted_message(message_id: str, chat_jid: str) -> tuple[str, str]:
-    """Look up a quoted message's content and sender from the messages DB.
+def _lookup_quoted_message(message_id: str, chat_jid: str) -> tuple[str, str, str]:
+    """Look up a quoted message's content, sender, and media_type from the messages DB.
 
-    Returns (content, sender) or ("", "") if not found.
+    Returns (content, sender, media_type) or ("", "", "") if not found.
     """
     try:
         conn = sqlite3.connect(_MESSAGES_DB)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT content, sender FROM messages WHERE id = ? AND chat_jid = ?",
+            "SELECT content, sender, media_type FROM messages WHERE id = ? AND chat_jid = ?",
             (message_id, chat_jid),
         )
         row = cursor.fetchone()
         conn.close()
         if row:
-            return row[0] or "", row[1] or ""
+            return row[0] or "", row[1] or "", row[2] or ""
     except Exception:
         pass
-    return "", ""
+    return "", "", ""
 
 
 def format_leo_response(text: str) -> str:
@@ -65,6 +71,65 @@ async def _reply(message: ReceivedMessage, text: str) -> None:
         reply_to=message.id,
         reply_to_sender=message.sender_jid,
     )
+
+
+def _load_and_resize_image(file_path: str) -> Image.Image:
+    """Open and downscale the image if it exceeds MAX_IMAGE_DIMENSION."""
+    img = Image.open(file_path)
+    img = img.convert("RGB")
+    w, h = img.size
+    if max(w, h) > MAX_IMAGE_DIMENSION:
+        scale = MAX_IMAGE_DIMENSION / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    return img
+
+
+def _encode_image_b64(img: Image.Image) -> str:
+    """Encode PIL image to base64 JPEG string."""
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _infer_mime(file_path: str) -> str:
+    """Return MIME type based on file extension, defaulting to image/jpeg."""
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    return {"png": "image/png", "gif": "image/gif", "webp": "image/webp"}.get(
+        ext, "image/jpeg"
+    )
+
+
+async def _build_vision_input(
+    image_message_id: str, chat_jid: str, text_payload: str
+) -> list | None:
+    """Download and encode the image, returning a multimodal input list.
+
+    Returns None if the download fails, signaling fallback to text-only.
+    """
+    file_path = await asyncio.to_thread(download_media, image_message_id, chat_jid)
+    if not file_path:
+        logger.warning(f"Could not download image for message {image_message_id}")
+        return None
+
+    try:
+        img = await asyncio.to_thread(_load_and_resize_image, file_path)
+        image_b64 = _encode_image_b64(img)
+    except Exception as e:
+        logger.error(f"Failed to process image file {file_path}: {e}", exc_info=True)
+        return None
+
+    mime_type = _infer_mime(file_path)
+    data_uri = f"data:{mime_type};base64,{image_b64}"
+
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": text_payload},
+                {"type": "input_image", "image_url": data_uri},
+            ],
+        }
+    ]
 
 
 async def process_message(data: dict):
@@ -100,11 +165,12 @@ async def process_message(data: dict):
     )
 
     # ── Enrich quoted message from DB if proto didn't embed content ──
-    if message.quoted_message_id and not message.quoted_message_content:
-        db_content, db_sender = _lookup_quoted_message(
+    quoted_media_type = ""
+    if message.quoted_message_id:
+        db_content, db_sender, quoted_media_type = _lookup_quoted_message(
             message.quoted_message_id, message.chat_jid
         )
-        if db_content:
+        if db_content and not message.quoted_message_content:
             message.quoted_message_content = db_content
         if db_sender and not message.quoted_message_sender:
             message.quoted_message_sender = db_sender
@@ -185,6 +251,18 @@ async def process_message(data: dict):
         # Check if sender is allowed to use privileged feature
         is_allowed = message.phone_number in ALLOWED_SENDERS
 
+        # ── Detect image: direct send or reply-to-image ──
+        is_direct_image = message.media_type == "image"
+        is_quoted_image = (
+            not is_direct_image
+            and message.quoted_message_id != ""
+            and quoted_media_type == "image"
+        )
+        has_image = is_direct_image or is_quoted_image
+        image_message_id = (
+            message.id if is_direct_image else message.quoted_message_id
+        )
+
         try:
             now = datetime.now(TZ)
             current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
@@ -197,17 +275,39 @@ async def process_message(data: dict):
             )
             instructions = template.format(current_time=current_time)
 
+            text_payload = orjson.dumps(asdict(message)).decode()
+
+            # Build multimodal input if image is present
+            vision_input = None
+            if has_image:
+                vision_input = await _build_vision_input(
+                    image_message_id, message.chat_jid, text_payload
+                )
+
+            # Use vision model if image was successfully processed, else text model
+            model = _cached_vision_model if vision_input else _cached_model
+            runner_input = vision_input if vision_input else text_payload
+
             async with mcp_stack(is_privileged=is_allowed) as mcp_servers:
                 agent, session = await agent_factory.get_agent(
                     chat_jid=message.chat_jid,
                     mcp_servers=mcp_servers,
-                    model=_cached_model,
+                    model=model,
                     instructions=instructions,
                 )
 
+                # When passing multimodal list input with session, we need a
+                # callback to merge it with conversation history.
+                run_config = None
+                if vision_input:
+                    run_config = RunConfig(
+                        session_input_callback=lambda history, new: history + new,
+                    )
+
                 with trace("LeoWhatsappAssistant"):
                     result = await Runner.run(
-                        agent, orjson.dumps(asdict(message)).decode(), session=session
+                        agent, runner_input, session=session,
+                        run_config=run_config,
                     )
 
                 logger.info(f"Agent execution completed. Result: {result.final_output}")

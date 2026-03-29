@@ -196,7 +196,18 @@ func extractTextContent(msg *waProto.Message) string {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Extract captions from media messages
+	if img := msg.GetImageMessage(); img != nil {
+		if caption := img.GetCaption(); caption != "" {
+			return caption
+		}
+	}
+	if vid := msg.GetVideoMessage(); vid != nil {
+		if caption := vid.GetCaption(); caption != "" {
+			return caption
+		}
+	}
+
 	return ""
 }
 
@@ -205,20 +216,42 @@ func extractQuotedMessage(msg *waProto.Message) (stanzaID string, participant st
 	if msg == nil {
 		return "", "", ""
 	}
-	extendedText := msg.GetExtendedTextMessage()
-	if extendedText == nil {
-		return "", "", ""
+
+	// Helper to extract from a ContextInfo
+	extractCtx := func(ctx *waProto.ContextInfo) bool {
+		if ctx == nil {
+			return false
+		}
+		stanzaID = ctx.GetStanzaID()
+		participant = ctx.GetParticipant()
+		if quoted := ctx.GetQuotedMessage(); quoted != nil {
+			quotedText = extractTextContent(quoted)
+		}
+		return stanzaID != ""
 	}
-	ctx := extendedText.GetContextInfo()
-	if ctx == nil {
-		return "", "", ""
+
+	// Path 1: text reply (ExtendedTextMessage)
+	if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
+		if extractCtx(extendedText.GetContextInfo()) {
+			return stanzaID, participant, quotedText
+		}
 	}
-	stanzaID = ctx.GetStanzaID()
-	participant = ctx.GetParticipant()
-	if quoted := ctx.GetQuotedMessage(); quoted != nil {
-		quotedText = extractTextContent(quoted)
+
+	// Path 2: image with caption that is itself a reply
+	if img := msg.GetImageMessage(); img != nil {
+		if extractCtx(img.GetContextInfo()) {
+			return stanzaID, participant, quotedText
+		}
 	}
-	return stanzaID, participant, quotedText
+
+	// Path 3: video with caption that is itself a reply
+	if vid := msg.GetVideoMessage(); vid != nil {
+		if extractCtx(vid.GetContextInfo()) {
+			return stanzaID, participant, quotedText
+		}
+	}
+
+	return "", "", ""
 }
 
 // SendMessageResponse represents the response for the send message API
