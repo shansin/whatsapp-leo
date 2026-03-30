@@ -25,6 +25,7 @@ from config import (
     mcp_stack,
 )
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE, INSTRUCTIONS_BASIC_TEMPLATE
+from memory import load_memory, make_memory_tools
 from models import ReceivedMessage
 from agent_factory import agent_factory, parse_remindme_with_agent, TZ
 from command_handlers import handle_briefing_command, handle_reminder_command
@@ -312,6 +313,13 @@ async def process_message(data: dict):
             )
             instructions = template.format(current_time=current_time)
 
+            # ── Inject user memory into instructions ──
+            memory_content = load_memory(message.phone_number)
+            if memory_content:
+                instructions += f"\n\n[USER MEMORY]\nThese are things this user has asked you to remember:\n{memory_content}"
+
+            memory_tools = make_memory_tools(message.phone_number)
+
             # ── Transcribe audio if present (inject into message before serializing) ──
             if has_audio:
                 transcript = await _transcribe_audio_message(
@@ -343,6 +351,7 @@ async def process_message(data: dict):
                     mcp_servers=mcp_servers,
                     model=model,
                     instructions=instructions,
+                    tools=memory_tools,
                 )
 
                 # When passing multimodal list input with session, we need a

@@ -28,7 +28,8 @@ class AgentFactory:
         return (time.time() - last_used) > TTL_SECONDS
 
     async def get_agent(
-        self, chat_jid: str, mcp_servers: list[MCPServerStdio], model, instructions: str
+        self, chat_jid: str, mcp_servers: list[MCPServerStdio], model, instructions: str,
+        tools: list | None = None,
     ) -> tuple[Agent, SQLiteSession]:
         """Get or create an Agent for the given chat_jid and model."""
         current_time = time.time()
@@ -46,6 +47,7 @@ class AgentFactory:
                 # Move to end (most recently used)
                 self._agents.move_to_end(cache_key)
                 agent.mcp_servers = mcp_servers
+                agent.tools = tools or []
                 self._agents[cache_key] = (agent, mcp_servers, session, current_time)
                 logger.info(
                     f"Reusing agent for {chat_jid}/{model_name} (cache: {len(self._agents)})"
@@ -59,7 +61,8 @@ class AgentFactory:
 
         # Create new agent and session (shared session per chat_jid for unified history)
         agent = Agent(
-            name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model, model_settings=_model_settings
+            name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model,
+            model_settings=_model_settings, tools=tools or [],
         )
         session = SQLiteSession(chat_jid)
         self._agents[cache_key] = (agent, mcp_servers, session, current_time)

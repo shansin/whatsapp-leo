@@ -10,7 +10,7 @@ def _load_instructions():
     instr_path = os.path.join(os.path.dirname(__file__), "instructions.txt")
     if not os.path.exists(instr_path):
         logger.warning(f"instructions.txt not found at {instr_path}")
-        return "", "", ""
+        return "", "", "", "", ""
 
     with open(instr_path, "r") as f:
         content = f.read()
@@ -36,6 +36,7 @@ def _load_instructions():
         "\n" + sections.get("PRIVILEDGED_INSTRUCTIONS", "") + "\n",
         "\n" + sections.get("COMMON_RULES", ""),
         sections.get("REMINDER_INSTRUCTIONS", ""),
+        "\n" + sections.get("MEMORY_INSTRUCTIONS", ""),
     )
 
 
@@ -45,11 +46,12 @@ def _load_instructions():
     _PRIVILEDGED_INSTRUCTIONS,
     _COMMON_RULES,
     _REMINDER_INSTRUCTIONS_TEMPLATE,
+    _MEMORY_INSTRUCTIONS,
 ) = _load_instructions()
 
 # Pre-built instruction templates (only {current_time} needs filling at message time)
 INSTRUCTIONS_PRIVILEGED_TEMPLATE = (
-    _BASE_INSTRUCTION_TEMPLATE + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES
+    _BASE_INSTRUCTION_TEMPLATE + _PRIVILEDGED_INSTRUCTIONS + _COMMON_RULES + _MEMORY_INSTRUCTIONS
 )
-INSTRUCTIONS_BASIC_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _COMMON_RULES
+INSTRUCTIONS_BASIC_TEMPLATE = _BASE_INSTRUCTION_TEMPLATE + _COMMON_RULES + _MEMORY_INSTRUCTIONS
 REMINDER_INSTRUCTIONS_TEMPLATE = _REMINDER_INSTRUCTIONS_TEMPLATE
