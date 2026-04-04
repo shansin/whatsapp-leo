@@ -302,7 +302,6 @@ Every value can be changed later by editing `.env` directly.
 | `VISION_MODEL_NAME` | Ollama model for image messages | `gemma3:27b` |
 | `MAX_IMAGE_DIMENSION` | Max pixel dimension before downscaling images | `1280` |
 | `WHISPER_MODEL_SIZE` | faster-whisper model size for audio transcription (tiny/base/small/medium/large) | `medium` |
-| `CONTEXT_SIZE` | Context window size (tokens) | `32768` |
 | `MAX_AGENTS` | Max cached agent instances (LRU eviction) | `20` |
 | `TTL_SECONDS` | Agent cache TTL | `1800` |
 | `ALLOWED_SENDERS` | Comma-separated phone numbers for privileged access | — |

@@ -36,7 +36,6 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
-CONTEXT_SIZE = os.getenv("CONTEXT_SIZE")
 
 # ── Sender / access control ─────────────────────────────────────────────────
 ALLOWED_SENDERS = [
@@ -66,8 +65,6 @@ X_MCP_PATH = os.path.join(
 _openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
 
 _model_settings = ModelSettings()
-if CONTEXT_SIZE:
-    _model_settings.extra_body = {"num_ctx": int(CONTEXT_SIZE)}
 
 _cached_model = OpenAIChatCompletionsModel(
     model=MODEL_NAME, openai_client=_openai_client
