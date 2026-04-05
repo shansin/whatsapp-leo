@@ -7,3 +7,4 @@ whatsapp-mcp/whatsapp-bridge/whatsapp-client
 scripts/__pycache__/
 x-mcp/x-mcp-server/__pycache__/
 store/*
+.playwright-mcp/*

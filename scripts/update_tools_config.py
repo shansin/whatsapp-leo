@@ -6,6 +6,7 @@ Usage:
     uv run scripts/update_tools_config.py --write    # write changes to tools_config.py
     uv run scripts/update_tools_config.py --add-new  # also add newly available tools to existing allowlists
     uv run scripts/update_tools_config.py --write --add-new
+    uv run scripts/update_tools_config.py -s playwright --write --add-new  # only query one server
 
 Merge rules (safe by default):
   • New server in registry → added to TOOL_CONFIG with None (all tools enabled).
@@ -68,13 +69,15 @@ def _first_line(text: str) -> str:
     return ""
 
 
-async def discover_all() -> dict[str, tuple[list[str], Descriptions] | None]:
-    """Fetch live tool lists for every server in MCP_REGISTRY sequentially.
+async def discover_all(servers: list[str] | None = None) -> dict[str, tuple[list[str], Descriptions] | None]:
+    """Fetch live tool lists for MCP servers sequentially.
 
+    If servers is given, only query those; otherwise query all in MCP_REGISTRY.
     Returns {server_name: (tool_names, descriptions)} or None if unreachable.
     """
+    targets = {n: MCP_REGISTRY[n] for n in servers} if servers else MCP_REGISTRY
     result = {}
-    for name, entry in MCP_REGISTRY.items():
+    for name, entry in targets.items():
         try:
             result[name] = await fetch_tools(name, entry)
         except Exception as exc:
@@ -208,9 +211,17 @@ def rewrite_tools_config(
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-async def main(write: bool, add_new_tools: bool) -> None:
-    print("Discovering tools from MCP servers...")
-    live = await discover_all()
+async def main(write: bool, add_new_tools: bool, servers: list[str] | None = None) -> None:
+    if servers:
+        unknown = [s for s in servers if s not in MCP_REGISTRY]
+        if unknown:
+            print(f"ERROR: unknown server(s): {unknown}")
+            print(f"Available: {list(MCP_REGISTRY.keys())}")
+            sys.exit(1)
+        print(f"Discovering tools from: {', '.join(servers)}...")
+    else:
+        print("Discovering tools from MCP servers...")
+    live = await discover_all(servers)
     print()
 
     # Separate names from descriptions for the two consumers
@@ -252,6 +263,8 @@ if __name__ == "__main__":
     parser.add_argument("--write", action="store_true", help="Write changes to tools_config.py")
     parser.add_argument("--add-new", action="store_true", dest="add_new_tools",
                         help="Also add newly available tools to existing allowlists")
+    parser.add_argument("--server", "-s", action="append", dest="servers", metavar="NAME",
+                        help="Only query specific server(s). Can be repeated: -s brave -s playwright")
     args = parser.parse_args()
 
-    asyncio.run(main(write=args.write, add_new_tools=args.add_new_tools))
+    asyncio.run(main(write=args.write, add_new_tools=args.add_new_tools, servers=args.servers))

@@ -16,6 +16,30 @@ TOOL_CONFIG: dict[str, list[str] | None] = {
         "search_tweets",    # Search tweets by keyword, hashtag, or from:username
     ],
 
+    "playwright": [
+        "browser_close",                        # Close the page
+        "browser_resize",                       # Resize the browser window
+        "browser_console_messages",             # Returns all console messages
+        "browser_handle_dialog",                # Handle a dialog
+        "browser_evaluate",                     # Evaluate JavaScript expression on page or element
+        "browser_file_upload",                  # Upload one or multiple files
+        "browser_fill_form",                    # Fill multiple form fields
+        "browser_press_key",                    # Press a key on the keyboard
+        "browser_type",                         # Type text into editable element
+        "browser_navigate",                     # Navigate to a URL
+        "browser_navigate_back",                # Go back to the previous page in the history
+        "browser_network_requests",             # Returns all network requests since loading the page
+        "browser_run_code",                     # Run Playwright code snippet
+        "browser_take_screenshot",              # Take a screenshot of the current page
+        "browser_snapshot",                     # Capture accessibility snapshot of the current page
+        "browser_click",                        # Perform click on a web page
+        "browser_drag",                         # Perform drag and drop between two elements
+        "browser_hover",                        # Hover over element on page
+        "browser_select_option",                # Select an option in a dropdown
+        "browser_tabs",                         # List, create, close, or select a browser tab
+        "browser_wait_for",                     # Wait for text to appear or disappear or a specified time to pass
+    ],
+
     "brave": None,
 
     "workspace": [

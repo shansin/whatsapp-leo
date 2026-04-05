@@ -47,6 +47,7 @@ IS_DEDICATED_NUMBER = os.getenv("IS_DEDICATED_NUMBER", "false").lower() == "true
 # ── Hooks ────────────────────────────────────────────────────────────────────
 IS_HOOK_ENABLED = os.getenv("IS_HOOK_ENABLED", "false").lower() == "true"
 HOOKS = [h.strip() for h in os.getenv("HOOKS", "").split(",") if h.strip()]
+PLAYWRIGHT_ENABLED = os.getenv("PLAYWRIGHT_ENABLED", "false").lower() == "true"
 
 # Maximum message size to prevent memory exhaustion (10MB)
 MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "10485760"))
@@ -117,28 +118,44 @@ _x_mcp_params = {
     "args": ["run", "python", X_MCP_PATH],
     "env": _shared_env,
 }
+_playwright_mcp_params = {
+    "command": "npx",
+    "args": ["@playwright/mcp@0.0.70", "--headless"],
+}
 
 # ── MCP registry ─────────────────────────────────────────────────────────────
 # Single source of truth for all configured MCP servers.
 # Used by mcp_stack (runtime) and update_tools_config.py (tool discovery).
-# Add new servers here when you add them to mcp_stack below.
+#
+# Fields:
+#   params   — MCPServerStdio constructor params (command, args, env)
+#   timeout  — client_session_timeout_seconds
+#   gate     — optional callable; server is skipped when it returns False
+#   privileged — if True, only started for allowed senders (default True)
 MCP_REGISTRY: dict[str, dict] = {
-    "workspace": {"params": _workspace_mcp_params, "timeout": 300},
-    "garmin":    {"params": _garmin_mcp_params,    "timeout": 120},
-    "x":         {"params": _x_mcp_params,         "timeout": 60},
-    "brave":     {"params": _brave_mcp_params,     "timeout": 30},
+    "workspace": {
+        "params": _workspace_mcp_params, "timeout": 300,
+        "gate": lambda: WORKSPACE_MCP_PATH and os.path.exists(WORKSPACE_MCP_PATH),
+    },
+    "garmin":     {"params": _garmin_mcp_params,     "timeout": 120},
+    "x":          {"params": _x_mcp_params,          "timeout": 60},
+    "playwright": {"params": _playwright_mcp_params, "timeout": 120,
+                   "gate": lambda: PLAYWRIGHT_ENABLED},
+    "brave":      {"params": _brave_mcp_params,      "timeout": 30, "privileged": False},
 }
+
+# Servers to start in order. Brave last so the model's recency bias keeps
+# web-search tools visible even with many tools from other servers.
+_PRIVILEGED_SERVERS = ["workspace", "garmin", "x", "playwright"]
+_ALWAYS_SERVERS = ["brave"]
 
 
 @asynccontextmanager
 async def mcp_stack(is_privileged: bool = False):
     """Async context manager that starts and yields configured MCP servers.
 
-    Always starts Brave search MCP. If is_privileged, also starts workspace
-    MCP (if available) and Garmin MCP.
-
-    Tool exposure is controlled by tools_config.py — edit the allowlists there
-    to change which tools each server exposes to the LLM.
+    Iterates MCP_REGISTRY, respecting each entry's ``privileged`` flag and
+    optional ``gate`` callable.  Tool exposure is controlled by tools_config.py.
     """
     from contextlib import AsyncExitStack
     from agents.mcp import MCPServerStdio
@@ -147,50 +164,23 @@ async def mcp_stack(is_privileged: bool = False):
     async with AsyncExitStack() as stack:
         servers = []
 
-        if is_privileged:
-            if WORKSPACE_MCP_PATH and os.path.exists(WORKSPACE_MCP_PATH):
-                ws = await stack.enter_async_context(
-                    MCPServerStdio(
-                        params=_workspace_mcp_params,
-                        client_session_timeout_seconds=300,
-                        tool_filter=make_tool_filter("workspace"),
-                        cache_tools_list=True,
-                    )
-                )
-                servers.append(ws)
-            elif WORKSPACE_MCP_PATH:
-                logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
+        order = (_PRIVILEGED_SERVERS if is_privileged else []) + _ALWAYS_SERVERS
+        for name in order:
+            entry = MCP_REGISTRY[name]
+            gate = entry.get("gate")
+            if gate and not gate():
+                if name == "workspace" and WORKSPACE_MCP_PATH:
+                    logger.warning(f"Workspace MCP not found at {WORKSPACE_MCP_PATH}")
+                continue
 
-            garmin = await stack.enter_async_context(
+            srv = await stack.enter_async_context(
                 MCPServerStdio(
-                    params=_garmin_mcp_params,
-                    client_session_timeout_seconds=120,
-                    tool_filter=make_tool_filter("garmin"),
+                    params=entry["params"],
+                    client_session_timeout_seconds=entry["timeout"],
+                    tool_filter=make_tool_filter(name),
                     cache_tools_list=True,
                 )
             )
-            servers.append(garmin)
-
-            x = await stack.enter_async_context(
-                MCPServerStdio(
-                    params=_x_mcp_params,
-                    client_session_timeout_seconds=60,
-                    tool_filter=make_tool_filter("x"),
-                    cache_tools_list=True,
-                )
-            )
-            servers.append(x)
-
-        # Brave comes last so the model's recency bias works in our favor
-        # (with many tools from workspace+garmin, models tend to ignore early-listed tools)
-        brave = await stack.enter_async_context(
-            MCPServerStdio(
-                params=_brave_mcp_params,
-                client_session_timeout_seconds=30,
-                tool_filter=make_tool_filter("brave"),
-                cache_tools_list=True,
-            )
-        )
-        servers.append(brave)
+            servers.append(srv)
 
         yield servers
