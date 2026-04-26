@@ -37,6 +37,15 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
 
+# Backup Ollama (degraded fallback when primary fails or stalls)
+OLLAMA_BACKUP_BASE_URL = os.getenv("OLLAMA_BACKUP_BASE_URL") or None
+OLLAMA_BACKUP_MODEL_NAME = os.getenv("OLLAMA_BACKUP_MODEL_NAME") or None
+OLLAMA_BACKUP_VISION_MODEL_NAME = (
+    os.getenv("OLLAMA_BACKUP_VISION_MODEL_NAME") or OLLAMA_BACKUP_MODEL_NAME
+)
+OLLAMA_PRIMARY_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_PRIMARY_TIMEOUT_SECONDS", "120"))
+OLLAMA_FALLBACK_STICKY_SECONDS = float(os.getenv("OLLAMA_FALLBACK_STICKY_SECONDS", "300"))
+
 # ── Sender / access control ─────────────────────────────────────────────────
 ALLOWED_SENDERS = [
     s.strip() for s in os.getenv("ALLOWED_SENDERS", "").split(",") if s.strip()
@@ -67,15 +76,54 @@ _openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
 
 _model_settings = ModelSettings()
 
-_cached_model = OpenAIChatCompletionsModel(
+_primary_text_model = OpenAIChatCompletionsModel(
     model=MODEL_NAME, openai_client=_openai_client
 )
 
 # ── Vision model (for image processing) ────────────────────────────────────
 VISION_MODEL_NAME = os.getenv("VISION_MODEL_NAME", "gemma3:27b")
 MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "1280"))
-_cached_vision_model = OpenAIChatCompletionsModel(
+_primary_vision_model = OpenAIChatCompletionsModel(
     model=VISION_MODEL_NAME, openai_client=_openai_client
+)
+
+# ── Backup wiring ────────────────────────────────────────────────────────────
+from fallback_model import FallbackModel, FallbackRouter
+
+_fallback_enabled = bool(OLLAMA_BACKUP_BASE_URL and OLLAMA_BACKUP_MODEL_NAME)
+_fallback_router = FallbackRouter(sticky_seconds=OLLAMA_FALLBACK_STICKY_SECONDS)
+
+if _fallback_enabled:
+    _backup_openai_client = AsyncOpenAI(
+        base_url=OLLAMA_BACKUP_BASE_URL, api_key="ollama"
+    )
+    _backup_text_model = OpenAIChatCompletionsModel(
+        model=OLLAMA_BACKUP_MODEL_NAME, openai_client=_backup_openai_client
+    )
+    _backup_vision_model = OpenAIChatCompletionsModel(
+        model=OLLAMA_BACKUP_VISION_MODEL_NAME, openai_client=_backup_openai_client
+    )
+    logger.info(
+        f"Ollama fallback enabled: backup={OLLAMA_BACKUP_BASE_URL} "
+        f"model={OLLAMA_BACKUP_MODEL_NAME} "
+        f"timeout={OLLAMA_PRIMARY_TIMEOUT_SECONDS}s "
+        f"sticky={OLLAMA_FALLBACK_STICKY_SECONDS}s"
+    )
+else:
+    _backup_text_model = None
+    _backup_vision_model = None
+
+_cached_model = FallbackModel(
+    primary=_primary_text_model,
+    backup=_backup_text_model,
+    router=_fallback_router,
+    primary_timeout_seconds=OLLAMA_PRIMARY_TIMEOUT_SECONDS,
+)
+_cached_vision_model = FallbackModel(
+    primary=_primary_vision_model,
+    backup=_backup_vision_model,
+    router=_fallback_router,
+    primary_timeout_seconds=OLLAMA_PRIMARY_TIMEOUT_SECONDS,
 )
 
 # ── Audio transcription (faster-whisper, lazy-loaded) ──────────────────────
