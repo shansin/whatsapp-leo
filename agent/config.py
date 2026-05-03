@@ -118,9 +118,28 @@ _x_mcp_params = {
     "args": ["run", "python", X_MCP_PATH],
     "env": _shared_env,
 }
+_playwright_user_data_dir = os.path.expanduser(
+    os.getenv(
+        "PLAYWRIGHT_USER_DATA_DIR",
+        "~/.cache/whatsapp-leo/playwright-profile",
+    )
+)
+_playwright_browser = os.getenv("PLAYWRIGHT_BROWSER", "chrome")
+_playwright_headless = os.getenv("PLAYWRIGHT_HEADLESS", "false").lower() == "true"
+_playwright_viewport = os.getenv("PLAYWRIGHT_VIEWPORT", "1280x800")
+
+_playwright_args = [
+    "@playwright/mcp@0.0.70",
+    "--browser", _playwright_browser,
+    "--user-data-dir", _playwright_user_data_dir,
+    "--viewport-size", _playwright_viewport,
+]
+if _playwright_headless:
+    _playwright_args.append("--headless")
+
 _playwright_mcp_params = {
     "command": "npx",
-    "args": ["@playwright/mcp@0.0.70", "--headless"],
+    "args": _playwright_args,
 }
 
 # ── MCP registry ─────────────────────────────────────────────────────────────
