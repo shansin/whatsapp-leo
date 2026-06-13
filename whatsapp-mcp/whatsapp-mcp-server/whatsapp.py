@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import functools
+import logging
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict
@@ -12,6 +13,8 @@ import audio
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 
@@ -796,18 +799,22 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
         if status_code == 200:
             if result.get("success", False):
                 path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
+                logger.info(f"Media downloaded successfully for {message_id}: {path}")
                 return path
             else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
+                logger.warning(
+                    f"Download failed for {message_id}: {result.get('message', 'Unknown error')}"
+                )
                 return None
         elif status_code == 0:
-            print(f"Connection error: {result.get('error', 'Unknown error')}")
+            logger.warning(
+                f"Connection error downloading {message_id}: {result.get('error', 'Unknown error')}"
+            )
             return None
         else:
-            print(f"Error: HTTP {status_code} - {result}")
+            logger.warning(f"Error downloading {message_id}: HTTP {status_code} - {result}")
             return None
-            
+
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error downloading {message_id}: {e}", exc_info=True)
         return None
