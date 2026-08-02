@@ -159,7 +159,10 @@ _brave_mcp_params = {
 }
 _garmin_mcp_params = {
     "command": "uvx",
-    "args": ["git+https://github.com/Taxuspt/garmin_mcp"],
+    # garmin_mcp declares an unpinned `mcp>=1.28.1` dependency and imports
+    # mcp.server.fastmcp, which the mcp 2.0.0 release removed. Pin mcp below
+    # 2.0.0 until upstream garmin_mcp updates for the new API.
+    "args": ["--with", "mcp<2.0.0", "git+https://github.com/Taxuspt/garmin_mcp"],
 }
 _x_mcp_params = {
     "command": "uv",
