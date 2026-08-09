@@ -208,16 +208,25 @@ if _override.get("vision"):
     set_vision_model(_override["vision"])
 
 # ── Audio transcription (faster-whisper) ───────────────────────────────────
-# distil-medium.en is several times faster than `medium` on CPU at comparable
-# quality for English. Set WHISPER_MODEL_SIZE=medium for multilingual notes.
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "distil-medium.en")
+# distil-small.en is the cheapest model that still transcribes English voice
+# notes well. Set WHISPER_MODEL_SIZE=medium or large-v3 for other languages.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "distil-small.en")
 # beam_size=1 (greedy) is much faster than 5 and rarely worse on short voice
 # notes; VAD skips silence, which is most of the cost on a rambling recording.
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
 WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() == "true"
-# Load the model at startup instead of on the first voice note, which
-# otherwise pays download + load time while the user waits.
-WHISPER_PREWARM = os.getenv("WHISPER_PREWARM", "true").lower() == "true"
+# CPU by default. device="auto" used to grab CUDA and hold ~2GB of VRAM for the
+# life of the process even if no voice note ever arrived — memory Ollama needs
+# for the main model. Set WHISPER_DEVICE=cuda (optionally with an index, e.g.
+# "cuda:1" to keep it off the GPU serving Ollama) if you would rather have the
+# speed.
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+# int8 is the right default on CPU: ~4x smaller than float32 and faster, with
+# no audible quality loss on speech. Use float16 / int8_float16 on CUDA.
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+# Off by default: on CPU the load is quick and only the first voice note pays
+# it, whereas pre-warming makes every start-up hold the model resident.
+WHISPER_PREWARM = os.getenv("WHISPER_PREWARM", "false").lower() == "true"
 
 _whisper_model = None
 
@@ -228,8 +237,18 @@ def get_whisper_model():
     if _whisper_model is None:
         from faster_whisper import WhisperModel
 
-        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="auto")
-        logger.info(f"Loaded faster-whisper model: {WHISPER_MODEL_SIZE}")
+        device, _, index = WHISPER_DEVICE.partition(":")
+        kwargs = {"device_index": int(index)} if index.isdigit() else {}
+        _whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE,
+            device=device,
+            compute_type=WHISPER_COMPUTE_TYPE,
+            **kwargs,
+        )
+        logger.info(
+            f"Loaded faster-whisper model: {WHISPER_MODEL_SIZE} "
+            f"({WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE})"
+        )
     return _whisper_model
 
 

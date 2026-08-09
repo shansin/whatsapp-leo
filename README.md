@@ -42,8 +42,9 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 ### 🎤 Voice Notes (Audio Transcription)
 - Send or reply-to a voice note and Leo will transcribe it using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (local Whisper inference, auto-detects CPU or CUDA)
 - The transcript is injected into the message content and processed through the normal AI pipeline
-- Model configurable via `WHISPER_MODEL_SIZE` (default: `distil-medium.en` — several times faster on CPU, but English-only; use `medium`/`large-v3` for other languages)
-- Greedy decoding and VAD silence-skipping by default (`WHISPER_BEAM_SIZE`, `WHISPER_VAD_FILTER`); the model is pre-warmed at startup so the first voice note doesn't pay load time
+- Model configurable via `WHISPER_MODEL_SIZE` (default: `distil-small.en` — fast and cheap, but English-only; use `medium`/`large-v3` for other languages)
+- Runs int8 on CPU by default (`WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`) so it doesn't hold VRAM that Ollama wants for the main model; set `WHISPER_DEVICE=cuda:1` to put it on a spare GPU instead
+- Greedy decoding and VAD silence-skipping by default (`WHISPER_BEAM_SIZE`, `WHISPER_VAD_FILTER`); the model loads on the first voice note unless `WHISPER_PREWARM=true`
 
 ### ⏰ Reminders
 - **One-shot** — `#remindme in 30 minutes call dentist` — parsed by a dedicated AI agent into a precise datetime, stored in SQLite, and fired by a background scheduler. `#remindme list` / `#remindme cancel <id>` to manage them
@@ -364,10 +365,12 @@ Every value can be changed later by editing `.env` directly.
 | `MODEL_NAME` | Ollama model to use (e.g. `qwen3.5:35b`) | — |
 | `VISION_MODEL_NAME` | Ollama model for image messages | `gemma3:27b` |
 | `MAX_IMAGE_DIMENSION` | Max pixel dimension before downscaling images | `1280` |
-| `WHISPER_MODEL_SIZE` | faster-whisper model (tiny/base/small/medium/large, or distil-*.en) | `distil-medium.en` |
+| `WHISPER_MODEL_SIZE` | faster-whisper model (tiny/base/small/medium/large, or distil-*.en) | `distil-small.en` |
 | `WHISPER_BEAM_SIZE` | Decoding beam width; 1 is greedy and much faster | `1` |
 | `WHISPER_VAD_FILTER` | Skip silence before transcribing | `true` |
-| `WHISPER_PREWARM` | Load the transcription model at startup | `true` |
+| `WHISPER_DEVICE` | `cpu`, `cuda`, or `cuda:<index>` to pin to a specific GPU | `cpu` |
+| `WHISPER_COMPUTE_TYPE` | Quantization: `int8` on CPU, `float16`/`int8_float16` on CUDA | `int8` |
+| `WHISPER_PREWARM` | Load the transcription model at startup | `false` |
 | `MAX_AGENTS` | Max cached agent instances (LRU eviction) | `20` |
 | `TTL_SECONDS` | Agent cache TTL | `1800` |
 | `DEFAULT_TZ` | Instance default timezone (per-user override via `#tz`) | `America/Los_Angeles` |
