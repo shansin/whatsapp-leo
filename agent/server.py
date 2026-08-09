@@ -5,7 +5,7 @@ import asyncio
 
 import orjson
 
-from config import SOCKET_PATH, MAX_MESSAGE_SIZE
+from config import SOCKET_PATH, MAX_MESSAGE_SIZE, prewarm_whisper
 from message_handler import process_message
 from briefing_executor import execute_briefing_prompt
 from logging_setup import logger
@@ -13,15 +13,18 @@ from whatsapp import send_message as whatsapp_send_message
 from reminder import ReminderScheduler, RecurringReminderScheduler
 from briefing import BriefingScheduler
 from hooks import init_hooks, cleanup_hooks
+from mcp_pool import mcp_pool
 
 
 async def handle_client(reader, writer):
     """Handle a single client connection."""
     try:
+        # Read to EOF, then parse once. Parsing after every chunk made this
+        # O(n²) in the payload size.
         chunks = bytearray()
         message_data = None
         while True:
-            chunk = await reader.read(4096)
+            chunk = await reader.read(65536)
             if not chunk:
                 break
             chunks.extend(chunk)
@@ -33,14 +36,15 @@ async def handle_client(reader, writer):
                 writer.write(orjson.dumps({"error": "Message too large"}))
                 await writer.drain()
                 return
-            try:
-                message_data = orjson.loads(chunks)
-                break
-            except orjson.JSONDecodeError:
-                continue
 
         if not chunks:
             return
+
+        try:
+            message_data = orjson.loads(chunks)
+        except orjson.JSONDecodeError as e:
+            logger.warning("Discarding malformed payload (%d bytes): %s", len(chunks), e)
+            message_data = None
 
         if message_data is not None:
             # Process immediately in background task
@@ -75,6 +79,15 @@ async def main():
     if os.path.exists(SOCKET_PATH):
         os.unlink(SOCKET_PATH)
 
+    # Bring up the MCP servers once for the process lifetime. Done in the
+    # background so the socket starts accepting immediately; the first message
+    # awaits ensure_started() and reuses whatever this task set up.
+    asyncio.create_task(mcp_pool.ensure_started())
+
+    # Load the transcription model now rather than making the first voice note
+    # wait for a model download plus load. Threaded: it is CPU/IO-bound.
+    asyncio.create_task(asyncio.to_thread(prewarm_whisper))
+
     # Start the reminder scheduler in the background
     scheduler = ReminderScheduler(send_fn=whatsapp_send_message)
     asyncio.create_task(scheduler.run())
@@ -94,7 +107,10 @@ async def main():
     init_hooks()
 
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
-    os.chmod(SOCKET_PATH, 0o666)
+    # 0666 let any local user post a message with a spoofed phone_number from
+    # ALLOWED_SENDERS, which grants Gmail/Calendar/memory access. The bridge
+    # runs as the same user, so owner-only is all it needs.
+    os.chmod(SOCKET_PATH, 0o600)
 
     logger.info(f"Unix domain socket Agent Server running at {SOCKET_PATH}")
 
@@ -103,3 +119,4 @@ async def main():
             await server.serve_forever()
     finally:
         cleanup_hooks()
+        await mcp_pool.stop()

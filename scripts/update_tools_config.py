@@ -33,6 +33,7 @@ sys.path.insert(0, AGENT_DIR)
 os.chdir(AGENT_DIR)  # needed for relative paths inside config.py
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.join(REPO_ROOT, ".env"), override=True)
 
 from config import MCP_REGISTRY  # noqa: E402 (after sys.path setup)
@@ -224,10 +225,7 @@ async def main(write: bool, add_new_tools: bool, servers: list[str] | None = Non
     live = await discover_all(servers)
     print()
 
-    # Separate names from descriptions for the two consumers
-    live_names: dict[str, list[str] | None] = {
-        name: (data[0] if data else None) for name, data in live.items()
-    }
+    # Descriptions are written alongside the tool names as comments
     all_descs: dict[str, Descriptions] = {
         name: data[1] for name, data in live.items() if data
     }

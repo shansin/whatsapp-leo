@@ -14,7 +14,6 @@ from config import (
     ALLOWED_SENDERS,
     IS_DEDICATED_NUMBER,
     _openai_client,
-    _cached_model,
 )
 from models import ReceivedMessage
 from agent_factory import agent_factory
@@ -151,7 +150,7 @@ def start_test_ui():
                 reply_text = None
                 try:
                     reply_text = await asyncio.wait_for(response_queue.get(), timeout=120.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     reply_text = "❌ Request timed out."
 
                 # Update the placeholder content

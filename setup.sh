@@ -167,11 +167,41 @@ ok "Go bridge built"
 cd "$PROJECT_DIR"
 echo ""
 
-# ── 4. Install Brave Search MCP ──────────────────────────────────────────────
+# ── 4. Install web MCP servers (Brave Search + Playwright) ───────────────────
 
 info "Pre-fetching Brave Search MCP (npx will cache it)..."
 npx -y @modelcontextprotocol/server-brave-search --help &>/dev/null || true
 ok "Brave Search MCP cached"
+
+info "Pre-fetching Playwright MCP (browser automation)..."
+npx -y @playwright/mcp@0.0.70 --help &>/dev/null || true
+ok "Playwright MCP cached"
+
+# Playwright drives a real Chrome. Prefer a system Chrome; otherwise point the
+# user at Playwright's own Chromium rather than failing at runtime.
+PLAYWRIGHT_PROFILE_DIR="$HOME/.cache/whatsapp-leo/playwright-profile"
+CHROME_BIN="$(command -v google-chrome || command -v google-chrome-stable || true)"
+
+if [ -n "$CHROME_BIN" ]; then
+    ok "Google Chrome found at $CHROME_BIN"
+    mkdir -p "$PLAYWRIGHT_PROFILE_DIR"
+    info "Browser profile: $PLAYWRIGHT_PROFILE_DIR"
+    echo "       It starts logged out, so Leo only reaches public pages."
+    echo "       To let Leo read pages behind a login, stop the agent and run"
+    echo "       this once with a display attached, then sign in:"
+    echo ""
+    echo "         npx @playwright/mcp@0.0.70 --browser chrome \\"
+    echo "           --user-data-dir $PLAYWRIGHT_PROFILE_DIR"
+    echo ""
+    echo "       On a headless box use 'ssh -X' from a desktop, the physical"
+    echo "       console, or Xvfb + x11vnc. Chrome locks the profile dir, so"
+    echo "       Leo and that browser cannot run at the same time."
+else
+    warn "Google Chrome not found."
+    echo "       Install it, or run 'npx playwright install chromium' and set"
+    echo "       PLAYWRIGHT_BROWSER=chromium in .env."
+    echo "       Browsing stays off until PLAYWRIGHT_ENABLED=true either way."
+fi
 echo ""
 
 # ── 5. Set up Google Workspace MCP ───────────────────────────────────────────
@@ -377,7 +407,14 @@ WORKSPACE_MCP_PATH="${WORKSPACE_MCP_PATH_RESOLVED}"
 X_COOKIE_PATH="${CFG_X_COOKIE_PATH}"
 ENVEOF
 
-ok ".env written"
+# .env holds API keys — keep it owner-only, not world-readable.
+chmod 600 "$PROJECT_DIR/.env"
+
+# Chat media and per-user memory files contain personal data.
+mkdir -p "$PROJECT_DIR/store"
+chmod 700 "$PROJECT_DIR/store"
+
+ok ".env written (mode 600)"
 echo ""
 
 # ── 9. Pull Ollama models ────────────────────────────────────────────────────
@@ -469,6 +506,23 @@ else
 fi
 echo ""
 
+# -- Garmin MCP install --
+# Installed as a uv tool so the agent starts it from a local binary instead of
+# resolving git+https://github.com/Taxuspt/garmin_mcp on every process start.
+GARMIN_MCP_REF="${GARMIN_MCP_REF:-a16f05770291fd25e35c58db17f9e77e70facbc2}"
+if command -v garmin-mcp >/dev/null 2>&1; then
+    ok "garmin-mcp already installed ($(command -v garmin-mcp))"
+else
+    info "Installing garmin-mcp locally (pinned to ${GARMIN_MCP_REF:0:8})..."
+    if uv tool install --with "mcp<2.0.0" \
+        "git+https://github.com/Taxuspt/garmin_mcp@${GARMIN_MCP_REF}"; then
+        ok "garmin-mcp installed"
+    else
+        warn "garmin-mcp install failed — the agent will fall back to uvx at runtime"
+    fi
+fi
+echo ""
+
 # -- Garmin auth --
 echo -e "  ${CYAN}── Garmin Connect ──${NC}"
 echo "  Authenticates with your Garmin account and stores OAuth"
@@ -495,7 +549,12 @@ if [ "$DO_GARMIN_AUTH" = "1" ]; then
     info "Launching garmin-mcp-auth (interactive — will prompt for email, password, and MFA)..."
     info "Tokens will be saved to ~/.garminconnect/ in the format the MCP expects."
     echo ""
-    if uvx --refresh --from "git+https://github.com/Taxuspt/garmin_mcp" garmin-mcp-auth; then
+    if command -v garmin-mcp-auth >/dev/null 2>&1; then
+        GARMIN_AUTH_CMD=(garmin-mcp-auth)
+    else
+        GARMIN_AUTH_CMD=(uvx --refresh --from "git+https://github.com/Taxuspt/garmin_mcp@${GARMIN_MCP_REF}" garmin-mcp-auth)
+    fi
+    if "${GARMIN_AUTH_CMD[@]}"; then
         if [ -d "$HOME/.garminconnect" ] && [ -n "$(ls -A "$HOME/.garminconnect" 2>/dev/null)" ]; then
             ok "Garmin authenticated — tokens stored in ~/.garminconnect/"
         else

@@ -1,10 +1,48 @@
-*.db
-whatsapp.log
+# Secrets / local config
 .env
-agent/__pycache__/
-whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
-whatsapp-mcp/whatsapp-bridge/whatsapp-client
-scripts/__pycache__/
-x-mcp/x-mcp-server/__pycache__/
+.env.*
+!.env_example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Data / runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
 store/*
 .playwright-mcp/*
+
+# Logs
+*.log
+
+# Go binaries (whatsapp bridge)
+whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+whatsapp-mcp/whatsapp-bridge/whatsapp-client
+
+# Local planning notes
+fable-plan.md
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

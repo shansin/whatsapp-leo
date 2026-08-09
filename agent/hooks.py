@@ -128,7 +128,7 @@ def _blocking_read_lines(path: str) -> list[str]:
     """
     logger.debug(f"FIFO reader: waiting for writer on {path}")
     lines: list[str] = []
-    with open(path, "r") as fifo:
+    with open(path) as fifo:
         while True:
             line = fifo.readline()
             if not line:

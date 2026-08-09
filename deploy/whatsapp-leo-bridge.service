@@ -1,0 +1,26 @@
+# Go WhatsApp bridge. See whatsapp-leo-agent.service for install steps.
+#
+# The bridge dials the agent's Unix socket, so it is ordered after the agent.
+# First run needs a QR scan: `systemctl --user stop whatsapp-leo-bridge` and run
+# the binary in a terminal once to pair.
+
+[Unit]
+Description=WhatsApp Leo — Go WhatsApp bridge
+After=network-online.target whatsapp-leo-agent.service
+Wants=network-online.target
+BindsTo=whatsapp-leo-agent.service
+
+[Service]
+Type=simple
+WorkingDirectory=%WORKDIR%/whatsapp-mcp/whatsapp-bridge
+EnvironmentFile=%WORKDIR%/.env
+ExecStartPre=/usr/bin/env go build -o whatsapp-bridge .
+ExecStart=%WORKDIR%/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whatsapp-leo-bridge
+
+[Install]
+WantedBy=default.target

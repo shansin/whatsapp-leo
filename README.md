@@ -1,6 +1,6 @@
 # 🦁 WhatsApp Leo
 
-A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, read X/Twitter feeds, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, understand voice notes and images, and bridge messages to external programs through named-pipe hooks.
+A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://ollama.com). Leo lives on a dedicated WhatsApp number and can answer questions, search the web, browse real pages in Chrome, read X/Twitter feeds, manage your Google Workspace, pull Garmin fitness data, set reminders, run scheduled briefings, understand voice notes and images, and bridge messages to external programs through named-pipe hooks.
 
 ## Architecture
 
@@ -8,11 +8,11 @@ A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://
 ┌──────────────┐  Unix Socket   ┌──────────────────┐   MCP (stdio)   ┌───────────────────────┐
 │  Go WhatsApp │◄──────────────►│  Python Agent    │◄───────────────►│  MCP Servers           │
 │  Bridge      │                │  Server          │                 │  • Brave Search        │
-│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • X (Twitter)         │
-└──────────────┘                └──────────────────┘                 │  • Google Workspace    │
-       │                               │                             │  • Garmin Connect      │
-  WhatsApp Web API              ┌──────┴──────┐                      └───────────────────────┘
-                                │  SQLite DBs │
+│  (whatsmeow) │                │  (OpenAI Agents) │                 │  • Playwright (Chrome) │
+└──────────────┘                └──────────────────┘                 │  • X (Twitter)         │
+       │                               │                             │  • Google Workspace    │
+  WhatsApp Web API              ┌──────┴──────┐                      │  • Garmin Connect      │
+                                │  SQLite DBs │                      └───────────────────────┘
                                 │  • messages │
                                 │  • reminders│
                                 │  • briefings│
@@ -21,7 +21,7 @@ A personal AI assistant on WhatsApp, powered by local LLMs via [Ollama](https://
 
 **Go WhatsApp Bridge** (`whatsapp-mcp/whatsapp-bridge/`) — Connects to WhatsApp's web multidevice API via [whatsmeow](https://github.com/tulir/whatsmeow), authenticates with a QR code, and persists message history in SQLite.
 
-**Python Agent Server** (`agent/`) — Receives messages over a Unix domain socket, runs them through an OpenAI-Agents-SDK pipeline backed by a local Ollama model, and replies via the bridge. Agents are cached per chat with LRU eviction and a configurable TTL.
+**Python Agent Server** (`agent/`) — Receives messages over a Unix domain socket, runs them through an OpenAI-Agents-SDK pipeline backed by a local Ollama model, and replies via the bridge. Agents are cached per chat with LRU eviction and a configurable TTL. MCP servers are started **once** per process and shared by every message (a crashed server is respawned in the background), so no message pays subprocess-spawn and handshake cost.
 
 Communication between the two processes uses **Unix domain sockets** (paths configurable via `INSTANCE_GUID`), allowing multiple instances on the same machine.
 
@@ -30,8 +30,9 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 ### 💬 Conversational AI
 - General knowledge Q&A powered by your chosen Ollama model
 - WhatsApp-native formatting (bold, italic, lists, quotes)
-- Per-chat conversation memory via `SQLiteSession`
+- Per-chat conversation memory, persisted to `store/sessions.db` (survives restarts) and trimmed to a rolling window so long chats don't overflow the model's context
 - **Quoted message context** — when replying to a message, Leo retrieves the quoted message (text, image, or audio) from the database and includes it as context for the response
+- **Live feedback** — a WhatsApp typing indicator runs for the duration of a request (local models can take 30s+), and failures reply with an error instead of going silent
 
 ### 🖼️ Vision (Multimodal)
 - Send or reply-to an image and Leo will analyze it using a dedicated vision model (configurable via `VISION_MODEL_NAME`, default: `gemma3:27b`)
@@ -41,18 +42,39 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 ### 🎤 Voice Notes (Audio Transcription)
 - Send or reply-to a voice note and Leo will transcribe it using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (local Whisper inference, auto-detects CPU or CUDA)
 - The transcript is injected into the message content and processed through the normal AI pipeline
-- Model size configurable via `WHISPER_MODEL_SIZE` (default: `medium`; options: tiny, base, small, medium, large)
+- Model configurable via `WHISPER_MODEL_SIZE` (default: `distil-medium.en` — several times faster on CPU, but English-only; use `medium`/`large-v3` for other languages)
+- Greedy decoding and VAD silence-skipping by default (`WHISPER_BEAM_SIZE`, `WHISPER_VAD_FILTER`); the model is pre-warmed at startup so the first voice note doesn't pay load time
 
 ### ⏰ Reminders
-- **One-shot** — `#remindme in 30 minutes call dentist` — parsed by a dedicated AI agent into a precise datetime, stored in SQLite, and fired by a background scheduler
+- **One-shot** — `#remindme in 30 minutes call dentist` — parsed by a dedicated AI agent into a precise datetime, stored in SQLite, and fired by a background scheduler. `#remindme list` / `#remindme cancel <id>` to manage them
 - **Recurring** — `#reminder add "9pm everyday" brush teeth` — cron-based schedule with add / list / remove / remove-all
+- **Snooze** — reply *snooze 10m* (or `2h`, `1d`) to a fired reminder to push it back
+- Schedules are stored with the timezone they were created in, so "9pm every day" keeps meaning 9pm where you are
 
 ### 📋 Scheduled Briefings
 - Automated AI-driven briefings that execute prompts on a cron schedule
 - Example: `#briefing add "Morning Brief" "9am everyday" Get my sleep data from Garmin and today's calendar events`
-- Subcommands: `add`, `list`, `remove`, `remove-all`, `help`
+- Subcommands: `add`, `list`, `remove`, `remove-all`, `run` (execute now), `pause`, `resume`, `help`
 - Briefings run through the full AI pipeline with access to all MCP tools
 - Retry logic (up to 3 attempts) for transient LLM errors
+
+### 📤 Richer replies
+- Long answers are split at paragraph / sentence boundaries instead of arriving as one wall of text; code fences are closed and reopened across the split
+- Leo can send files back into the chat (`send_file_to_chat`), restricted to its own store and an optional `SHARE_DIR` — resolved through symlinks so it can't be talked into sending `.env`
+- Optional voice replies to voice notes: set `VOICE_REPLIES=true` and a `TTS_COMMAND` (piper, kokoro, anything that reads stdin and writes `{out}`)
+
+### ⌨️ Message debouncing
+- People send a thought as three or four rapid messages; Leo waits `DEBOUNCE_SECONDS` (default 2.5) and answers the whole thought once
+- Images and voice notes are never debounced — each is a turn on its own
+
+### 🔎 Chat history
+- Leo can search the message archive the bridge already stores: *"what did Sam say about the trip?"*, *"summarise this group today"*
+- Tools: `search_chat_history`, `recent_chat_messages`, `messages_from_person`, `find_chats`
+- Privileged senders only — this is the full personal message archive
+
+### 🌍 Per-user timezone
+- `#tz Europe/London` sets your timezone; `#tz` shows it
+- Reminders, briefings and the clock Leo reports all follow the sender's timezone, falling back to `DEFAULT_TZ`
 
 ### 🪝 Hooks (bidirectional named pipes)
 - Route WhatsApp messages to external programs and receive responses back
@@ -68,9 +90,12 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - All background schedulers (reminders, briefings) still run
 
 ### 🔒 Access Control
-- `ALLOWED_SENDERS` whitelist — only listed phone numbers get privileged features (Google Workspace, Garmin, X, reminders, briefings)
+- `ALLOWED_SENDERS` whitelist — only listed phone numbers get privileged features (Google Workspace, Garmin, X, Chrome browsing, reminders, briefings)
 - Non-privileged users can still chat and use web search
 - Dedicated-number mode (`IS_DEDICATED_NUMBER=true`) responds to all DMs; in shared-number mode Leo only responds when mentioned (`@leo` / `#leo`)
+- Unix sockets live in `$XDG_RUNTIME_DIR` (falling back to `/tmp`) with mode `0600` — anything that can write to the agent socket could otherwise spoof an allowed sender
+- Commands are matched as a **prefix**, so a sentence merely mentioning `#briefing` is treated as normal chat; non-privileged senders get a refusal rather than silence
+- `REQUIRE_WRITE_CONFIRMATION=true` refuses mutating tool calls (calendar writes, drafts, and acting browser tools like click/type/evaluate/upload) at the MCP boundary until the user replies with a confirmation — a code-level guard against prompt injection arriving via quoted messages, transcripts, web results, or the text of any page Leo opens. Strongly recommended whenever `PLAYWRIGHT_ENABLED=true`
 
 ## MCP Servers & Tools
 
@@ -84,6 +109,37 @@ Web search via the [Brave Search API](https://brave.com/search/api/). All tools 
 |---|---|
 | `brave_web_search` | Real-time web search |
 | `brave_local_search` | Location-aware local business/place search |
+
+### 🌐 Chrome browsing — privileged users
+
+Real page browsing via [Playwright MCP](https://github.com/microsoft/playwright-mcp), driving a Chrome instance with its own persistent profile. Search finds a URL; browsing reads what's actually on it — full articles, pages behind a cookie wall, or pages behind a login the profile already holds. **Off by default**; set `PLAYWRIGHT_ENABLED=true`.
+
+| Tool | Description |
+|---|---|
+| `browser_navigate` / `browser_navigate_back` | Go to a URL, or back in history |
+| `browser_snapshot` | Accessibility-tree text of the page — the main way Leo *reads* |
+| `browser_take_screenshot` | Pixels, for when you want to *see* the page |
+| `browser_click` / `browser_hover` / `browser_drag` | Pointer interaction |
+| `browser_type` / `browser_fill_form` / `browser_press_key` / `browser_select_option` | Text and form input |
+| `browser_evaluate` / `browser_run_code` | Run JavaScript, or a Playwright snippet, against the page |
+| `browser_file_upload` | Attach a local file to a form |
+| `browser_handle_dialog` | Accept or dismiss a native dialog |
+| `browser_tabs` / `browser_resize` / `browser_wait_for` / `browser_close` | Page and tab management |
+| `browser_console_messages` / `browser_network_requests` | Console and network inspection |
+
+**The profile.** `PLAYWRIGHT_USER_DATA_DIR` (default `~/.cache/whatsapp-leo/playwright-profile`) starts logged out, so Leo reaches only public pages. To give it authenticated access, sign that profile in once by hand — stop the agent first, as Chrome locks the directory to a single process:
+
+```bash
+systemctl --user stop whatsapp-leo-agent
+npx @playwright/mcp@0.0.70 --browser chrome \
+  --user-data-dir ~/.cache/whatsapp-leo/playwright-profile
+```
+
+That needs a display. On a headless box, `ssh -X` in from a desktop (needs `xauth` server-side), use the physical console, or run it under Xvfb + x11vnc. Keep the profile dedicated to Leo: whatever it is signed into is what a page that successfully injects Leo can act on.
+
+**Headless.** `PLAYWRIGHT_HEADLESS` defaults to `true`, since Leo normally runs as a systemd user unit with no `DISPLAY`. Some sites bot-detect headless Chrome; the fallback is a virtual display (`Xvfb :99`, `Environment=DISPLAY=:99` in the unit) with `PLAYWRIGHT_HEADLESS=false`. `PLAYWRIGHT_NO_SANDBOX` defaults to `true` because recent kernels block Chrome's own sandbox under a user unit — turn it off wherever the sandbox works.
+
+**Safety.** A web page is attacker-controlled text arriving in a privileged agent, so run browsing with `REQUIRE_WRITE_CONFIRMATION=true`. Reading (`browser_navigate`, `browser_snapshot`, …) is never gated; acting (`browser_click`, `browser_type`, `browser_fill_form`, `browser_evaluate`, `browser_run_code`, `browser_file_upload`, …) is refused at the MCP boundary until you reply with a confirmation.
 
 ### 📅 Google Workspace — privileged users
 
@@ -267,7 +323,8 @@ uv run scripts/update_tools_config.py --write --add-new
 | **[uv](https://docs.astral.sh/uv/)** | Python package manager |
 | **Go** | WhatsApp bridge |
 | **[Ollama](https://ollama.com)** | Local LLM inference |
-| **Node.js / npm** | Brave Search MCP, Workspace MCP |
+| **Node.js / npm** | Brave Search MCP, Playwright MCP, Workspace MCP |
+| **Google Chrome** | Chrome browsing (optional; or `npx playwright install chromium` with `PLAYWRIGHT_BROWSER=chromium`) |
 | **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** | Voice note transcription (installed via `uv sync`) |
 
 ## Setup
@@ -301,19 +358,48 @@ Every value can be changed later by editing `.env` directly.
 | `MODEL_NAME` | Ollama model to use (e.g. `qwen3.5:35b`) | — |
 | `VISION_MODEL_NAME` | Ollama model for image messages | `gemma3:27b` |
 | `MAX_IMAGE_DIMENSION` | Max pixel dimension before downscaling images | `1280` |
-| `WHISPER_MODEL_SIZE` | faster-whisper model size for audio transcription (tiny/base/small/medium/large) | `medium` |
+| `WHISPER_MODEL_SIZE` | faster-whisper model (tiny/base/small/medium/large, or distil-*.en) | `distil-medium.en` |
+| `WHISPER_BEAM_SIZE` | Decoding beam width; 1 is greedy and much faster | `1` |
+| `WHISPER_VAD_FILTER` | Skip silence before transcribing | `true` |
+| `WHISPER_PREWARM` | Load the transcription model at startup | `true` |
 | `MAX_AGENTS` | Max cached agent instances (LRU eviction) | `20` |
 | `TTL_SECONDS` | Agent cache TTL | `1800` |
+| `DEFAULT_TZ` | Instance default timezone (per-user override via `#tz`) | `America/Los_Angeles` |
+| `USER_PREFS_PATH` | Where per-user preferences are stored | `store/user_prefs.json` |
+| `MAX_SESSION_ITEMS` | Rolling window of conversation items kept per chat (0 = unlimited) | `40` |
+| `SESSIONS_DB_PATH` | Where conversation history is stored | `store/sessions.db` |
+| `DEBOUNCE_SECONDS` | Window for merging rapid consecutive messages (0 disables) | `2.5` |
+| `MAX_BURST_MESSAGES` | Flush a burst once it reaches this many messages | `10` |
+| `MAX_REPLY_CHARS` | Split replies longer than this | `3500` |
+| `SHARE_DIR` | Extra directory Leo may send files from | — |
+| `MAX_SEND_BYTES` | Largest file Leo will send | `64MB` |
+| `VOICE_REPLIES` / `TTS_COMMAND` | Reply to voice notes with a voice note | off |
+| `LOG_FILE` / `LOG_MAX_BYTES` / `LOG_BACKUP_COUNT` | Rotated file log | off / 10MB / 5 |
+| `LOG_LEVEL` | Root log level | `INFO` |
+| `PRESENCE_ENABLED` | Show a WhatsApp typing indicator while a run is in flight | `true` |
+| `PRESENCE_REFRESH_SECONDS` | How often the typing indicator is refreshed | `8` |
+| `AGENTS_TRACING_ENABLED` | Export Agents SDK run traces to OpenAI (off — traces contain message content) | `false` |
+| `GARMIN_MCP_COMMAND` | Path to a locally installed `garmin-mcp` binary | auto-detected |
+| `GARMIN_MCP_REF` | garmin_mcp commit used when falling back to `uvx` | pinned SHA |
 | `ALLOWED_SENDERS` | Comma-separated phone numbers for privileged access | — |
 | `LEO_MENTION_ID` | WhatsApp mention ID for group triggers | — |
 | `IS_DEDICATED_NUMBER` | `true` if Leo has its own phone number | `false` |
 | `IS_TEST_MODE` | `true` to launch Gradio UI instead of WhatsApp bridge | `false` |
 | `OPENAI_API_KEY` | Required by the OpenAI Agents SDK (can be a dummy value for Ollama) | — |
 | `BRAVE_API_KEY` | API key for Brave Search | — |
-| `REMINDER_POLL_INTERVAL` | Seconds between reminder scheduler polls | `30` |
+| `REMINDER_POLL_INTERVAL` | Seconds between reminder scheduler polls | `60` |
+| `BRIEFING_POLL_INTERVAL` | Seconds between briefing scheduler polls | `60` |
+| `MESSAGES_DB_PATH` | Shared messages database (bridge writes, agent reads) | `store/messages.db` |
+| `REQUIRE_WRITE_CONFIRMATION` | Refuse write-capable tool calls until the user confirms in a reply | `false` |
 | `IS_HOOK_ENABLED` | Enable the hooks system | `false` |
 | `HOOKS` | Comma-separated hook names (e.g. `claude,claude-session`) | — |
 | `WORKSPACE_MCP_PATH` | Path to the Workspace MCP server `dist/index.js` | — |
+| `PLAYWRIGHT_ENABLED` | Enable Chrome browsing (privileged users only) | `false` |
+| `PLAYWRIGHT_BROWSER` | `chrome` \| `chromium` \| `msedge` \| `firefox` \| `webkit` | `chrome` |
+| `PLAYWRIGHT_HEADLESS` | Run without a display; `false` needs a real display or Xvfb | `true` |
+| `PLAYWRIGHT_NO_SANDBOX` | Pass `--no-sandbox`; needed where the kernel blocks Chrome's sandbox | `true` |
+| `PLAYWRIGHT_USER_DATA_DIR` | Persistent Chrome profile directory | `~/.cache/whatsapp-leo/playwright-profile` |
+| `PLAYWRIGHT_VIEWPORT` | Browser viewport size | `1280x800` |
 | `X_COOKIE_PATH` | Path to the X (Twitter) session cookie file | `/tmp/x_cookies.json` |
 
 ### Service authentication
@@ -386,6 +472,29 @@ This script:
 4. Prints Unix socket paths and hook FIFO paths (if enabled)
 5. Handles graceful shutdown on `Ctrl+C`
 
+It waits for the agent's socket to appear before starting the bridge, rather
+than sleeping and hoping.
+
+### Running under systemd (recommended for always-on)
+
+`start_services.sh` backgrounds both processes and dies with your shell. For an
+always-on instance use the user units in `deploy/`, which add
+`Restart=on-failure`:
+
+```bash
+mkdir -p ~/.config/systemd/user
+for unit in agent bridge; do
+  sed "s|%WORKDIR%|$PWD|g" deploy/whatsapp-leo-$unit.service \
+    > ~/.config/systemd/user/whatsapp-leo-$unit.service
+done
+systemctl --user daemon-reload
+systemctl --user enable --now whatsapp-leo-agent whatsapp-leo-bridge
+loginctl enable-linger "$USER"      # keep running after logout
+journalctl --user -u whatsapp-leo-agent -f
+```
+
+Pair the bridge once interactively (QR scan) before enabling the unit.
+
 ### Test mode (optional)
 
 ```bash
@@ -402,6 +511,16 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 │   ├── agent.py              # Entry point — dispatches to server or test UI
 │   ├── server.py             # Unix domain socket server, starts schedulers
 │   ├── config.py             # Environment config, model/MCP singletons, MCP_REGISTRY
+│   ├── mcp_pool.py           # Long-lived MCP servers (one process each) + auto-restart
+│   ├── session_store.py      # Durable per-chat history with a rolling window
+│   ├── timeutil.py           # UTC storage format for scheduled times
+│   ├── write_guard.py        # Optional confirmation gate for write-capable tools
+│   ├── user_prefs.py         # Per-user preferences (timezone)
+│   ├── history_tools.py      # Read-only chat-history search tools
+│   ├── send_tools.py         # Send files back to chat (path-restricted)
+│   ├── reply.py              # Reply splitting + optional TTS voice replies
+│   ├── debounce.py           # Merges rapid consecutive messages into one turn
+│   ├── sqlite_store.py       # Shared SQLite connection + polling-scheduler base
 │   ├── tools_config.py       # Per-server tool allowlists (TOOL_CONFIG)
 │   ├── agent_factory.py      # LRU-cached Agent instances + reminder parser
 │   ├── message_handler.py    # Core message routing (hooks, commands, AI, vision, audio)
@@ -426,19 +545,39 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 │   └── whatsapp-mcp-server/  # Python MCP server for WhatsApp tools
 ├── store/                    # SQLite databases (gitignored)
 │   ├── messages.db
+│   ├── sessions.db
 │   ├── reminders.db
 │   └── briefings.db
+├── deploy/                   # systemd user units (Restart=on-failure)
+├── tests/                    # pytest suite (no WhatsApp/Ollama required)
+├── .github/workflows/ci.yml  # ruff + pytest + go vet/build + shell checks
 ├── start_services.sh         # Service orchestration script
-├── pyproject.toml            # Python project config (uv)
+├── pyproject.toml            # Python project config (uv) — direct deps only, uv.lock pins the rest
 ├── .env_example              # Environment variable template
 └── .python-version           # Python 3.13
 ```
+
+## Development
+
+```bash
+uv sync --all-groups     # install runtime + dev dependencies
+uv run pytest -q         # 151 tests, no WhatsApp or Ollama needed
+uv run ruff check agent/ tests/ scripts/
+uv run mypy              # advisory; the tree is only partly annotated
+(cd whatsapp-mcp/whatsapp-bridge && go vet ./... && go build ./...)
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks on push and PR.
 
 ## WhatsApp Commands
 
 | Command | Description |
 |---|---|
+| `#help` | List every command |
 | `#remindme <time> <message>` | Set a one-time reminder |
+| `#remindme list` | List pending one-time reminders |
+| `#remindme cancel <id>` | Cancel a pending one-time reminder |
+| `snooze 10m` (as a reply) | Push a fired reminder back by 10m / 2h / 1d |
 | `#reminder add "schedule" message` | Create a recurring reminder |
 | `#reminder list` | List all recurring reminders |
 | `#reminder remove <id>` | Remove a recurring reminder |
@@ -447,6 +586,10 @@ Open `http://127.0.0.1:7860` for the Gradio chat UI.
 | `#briefing list` | List all briefings |
 | `#briefing remove <id>` | Remove a briefing |
 | `#briefing remove-all` | Remove all briefings |
+| `#briefing run <id>` | Run a briefing immediately (test it) |
+| `#briefing pause <id>` / `#briefing resume <id>` | Disable or re-enable a briefing |
+| `#tz` / `#tz Europe/London` | Show or set your timezone |
+| `#status` | Model in use, MCP health, uptime, recent errors |
 | `#hook-name <message>` | Send message to a named hook |
 | `#hook-name #start` | Start a hook session — all messages forwarded to hook |
 | `#hook-name #stop` | End a hook session — resume normal Leo processing |

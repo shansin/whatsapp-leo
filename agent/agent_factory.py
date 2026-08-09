@@ -1,16 +1,18 @@
 """Agent factory with LRU caching and TTL, plus reminder parsing agent."""
 
+import asyncio
 import time
 from collections import OrderedDict
 from datetime import datetime
 
 from dateutil import parser as dateutil_parser
-from agents import Agent, Runner, SQLiteSession
-from agents.mcp import MCPServerStdio
+from agents import Agent, Runner
+from agents.mcp import MCPServer
 
 from config import MAX_AGENTS, TTL_SECONDS, TZ, _cached_model, _model_settings
 from instructions import REMINDER_INSTRUCTIONS_TEMPLATE
 from models import ReminderParsed
+from session_store import TrimmedSQLiteSession, get_session
 from logging_setup import logger
 
 
@@ -19,25 +21,45 @@ class AgentFactory:
 
     def __init__(self):
         # OrderedDict keyed by (chat_jid, model_name) to maintain LRU order
-        self._agents: OrderedDict[
-            tuple[str, str], tuple[Agent, list[MCPServerStdio], SQLiteSession, float]
-        ] = OrderedDict()
+        self._agents: OrderedDict[tuple[str, str], tuple[Agent, float]] = OrderedDict()
+        # One lock per chat. Runs in the same chat must not interleave: they
+        # share one Agent object (whose mcp_servers/tools/instructions are
+        # rebound per message) and one session, and concurrent Runner.run calls
+        # against a single session interleave its history.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def lock_for(self, chat_jid: str) -> asyncio.Lock:
+        """Return the serialization lock for a chat."""
+        lock = self._locks.get(chat_jid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[chat_jid] = lock
+        return lock
 
     def _is_expired(self, last_used: float) -> bool:
         """Check if an entry has exceeded the TTL."""
         return (time.time() - last_used) > TTL_SECONDS
 
     async def get_agent(
-        self, chat_jid: str, mcp_servers: list[MCPServerStdio], model, instructions: str,
+        self, chat_jid: str, mcp_servers: list[MCPServer], model, instructions: str,
         tools: list | None = None,
-    ) -> tuple[Agent, SQLiteSession]:
-        """Get or create an Agent for the given chat_jid and model."""
+    ) -> tuple[Agent, TrimmedSQLiteSession]:
+        """Get or create an Agent for the given chat_jid and model.
+
+        Callers must hold ``lock_for(chat_jid)``: the returned agent is shared
+        and its per-message fields are rebound here.
+
+        The session is deliberately *not* cached alongside the agent — it is
+        keyed by chat alone, so history survives cache eviction and is shared by
+        the text and vision agents for the same chat.
+        """
         current_time = time.time()
-        model_name = model.model if hasattr(model, "model") else str(model)
+        model_name = getattr(model, "model", None) or str(model)
         cache_key = (chat_jid, model_name)
+        session = get_session(chat_jid)
 
         if cache_key in self._agents:
-            agent, _, session, last_used = self._agents[cache_key]
+            agent, last_used = self._agents[cache_key]
 
             # Check if expired (TTL exceeded)
             if self._is_expired(last_used):
@@ -48,7 +70,8 @@ class AgentFactory:
                 self._agents.move_to_end(cache_key)
                 agent.mcp_servers = mcp_servers
                 agent.tools = tools or []
-                self._agents[cache_key] = (agent, mcp_servers, session, current_time)
+                agent.instructions = instructions
+                self._agents[cache_key] = (agent, current_time)
                 logger.info(
                     f"Reusing agent for {chat_jid}/{model_name} (cache: {len(self._agents)})"
                 )
@@ -59,13 +82,11 @@ class AgentFactory:
             (oldest_jid, oldest_model), _ = self._agents.popitem(last=False)
             logger.info(f"Evicting LRU agent for {oldest_jid}/{oldest_model}")
 
-        # Create new agent and session (shared session per chat_jid for unified history)
         agent = Agent(
             name="Leo", instructions=instructions, mcp_servers=mcp_servers, model=model,
             model_settings=_model_settings, tools=tools or [],
         )
-        session = SQLiteSession(chat_jid)
-        self._agents[cache_key] = (agent, mcp_servers, session, current_time)
+        self._agents[cache_key] = (agent, current_time)
         logger.info(f"Created new agent for {chat_jid}/{model_name} (cache: {len(self._agents)})")
         return agent, session
 
@@ -76,30 +97,38 @@ agent_factory = AgentFactory()
 
 # ── Reminder parsing agent ──────────────────────────────────────────────────
 
-# Cached ReminderParser agent (instructions are updated dynamically per call)
+# Template agent — never run directly. Each call clones it with its own
+# instructions, because two concurrent #remindme messages sharing one agent
+# would race and one could be parsed against the other's timestamp.
 _reminder_parser_agent = Agent(
     name="ReminderParser",
-    instructions="",  # set dynamically before each run
+    instructions="",  # set per call, on the clone
     model=_cached_model,
     model_settings=_model_settings,
     output_type=ReminderParsed,
 )
 
 
-async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
+async def parse_remindme_with_agent(
+    content: str, tz=None
+) -> tuple[datetime, str]:
     """Use an OpenAI agent to parse a #remindme message into (remind_at, message).
+
+    ``tz`` is the requesting user's timezone; "in 30 minutes" and "9am
+    tomorrow" are both meaningless without it.
 
     Returns (remind_at_datetime, reminder_message_text).
     Raises ValueError if parsing fails.
     """
-    now = datetime.now(TZ)
+    tz = tz or TZ
+    now = datetime.now(tz)
     current_time = now.strftime("%I:%M %p %Z, %A %B %d, %Y")
 
-    _reminder_parser_agent.instructions = REMINDER_INSTRUCTIONS_TEMPLATE.format(
-        current_time=current_time
+    parser_agent = _reminder_parser_agent.clone(
+        instructions=REMINDER_INSTRUCTIONS_TEMPLATE.format(current_time=current_time)
     )
 
-    result = await Runner.run(_reminder_parser_agent, content)
+    result = await Runner.run(parser_agent, content)
     parsed: ReminderParsed = result.final_output
 
     try:
@@ -107,8 +136,8 @@ async def parse_remindme_with_agent(content: str) -> tuple[datetime, str]:
     except (ValueError, OverflowError) as exc:
         raise ValueError(f"Could not understand the time: {parsed.remind_at}") from exc
 
-    # If no timezone was provided, assume our local TZ
+    # If no timezone was provided, assume the user's
     if remind_at.tzinfo is None:
-        remind_at = remind_at.replace(tzinfo=TZ)
+        remind_at = remind_at.replace(tzinfo=tz)
 
     return (remind_at, parsed.reminder_message)

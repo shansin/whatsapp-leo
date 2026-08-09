@@ -26,7 +26,7 @@ def load_memory(phone: str) -> str:
     if not os.path.exists(path):
         return ""
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return f.read().strip()
     except Exception as e:
         logger.error(f"Failed to read memory file {path}: {e}")

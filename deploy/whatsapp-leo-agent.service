@@ -1,0 +1,33 @@
+# Python agent server.
+#
+# Install (user units, no root needed):
+#   mkdir -p ~/.config/systemd/user
+#   sed "s|%WORKDIR%|$PWD|g" deploy/whatsapp-leo-agent.service  > ~/.config/systemd/user/whatsapp-leo-agent.service
+#   sed "s|%WORKDIR%|$PWD|g" deploy/whatsapp-leo-bridge.service > ~/.config/systemd/user/whatsapp-leo-bridge.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now whatsapp-leo-agent whatsapp-leo-bridge
+#   loginctl enable-linger $USER    # keep running after logout
+#
+# Replaces start_services.sh's backgrounded processes: systemd restarts a
+# crashed service instead of leaving it dead, and orders the bridge after the
+# agent socket rather than guessing with `sleep 2`.
+
+[Unit]
+Description=WhatsApp Leo — Python agent server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%WORKDIR%
+EnvironmentFile=%WORKDIR%/.env
+ExecStart=/usr/bin/env uv run python agent/agent.py
+Restart=on-failure
+RestartSec=5s
+# Journald handles rotation; set LOG_FILE in .env for a rotated file log too.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whatsapp-leo-agent
+
+[Install]
+WantedBy=default.target

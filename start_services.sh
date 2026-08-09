@@ -32,9 +32,19 @@ fi
 # Get instance GUID (default to "default" if not set)
 INSTANCE_GUID="${INSTANCE_GUID:-default}"
 
-# Set socket paths based on env vars or defaults with INSTANCE_GUID
-AGENT_SOCKET_PATH="${AGENT_SOCKET_PATH:-/tmp/whatsapp-leo-${INSTANCE_GUID}.sock}"
-BRIDGE_SOCKET_PATH="${BRIDGE_SOCKET_PATH:-/tmp/whatsapp-bridge-${INSTANCE_GUID}.sock}"
+# Sockets live in $XDG_RUNTIME_DIR (per-user, mode 700) rather than
+# world-writable /tmp — anything that can write to the agent socket can spoof an
+# allowed sender. Mirrored in agent/config.py and the Go bridge.
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+[ -d "$RUNTIME_DIR" ] && [ -w "$RUNTIME_DIR" ] || RUNTIME_DIR="/tmp"
+
+# Set socket paths based on env vars or defaults with INSTANCE_GUID.
+# Exported so the agent and the bridge cannot disagree about them.
+export AGENT_SOCKET_PATH="${AGENT_SOCKET_PATH:-$RUNTIME_DIR/whatsapp-leo-${INSTANCE_GUID}.sock}"
+export BRIDGE_SOCKET_PATH="${BRIDGE_SOCKET_PATH:-$RUNTIME_DIR/whatsapp-bridge-${INSTANCE_GUID}.sock}"
+
+# One messages.db for the bridge (writer) and the Python side (readers).
+export MESSAGES_DB_PATH="${MESSAGES_DB_PATH:-$PROJECT_DIR/store/messages.db}"
 
 echo "Starting WhatsApp Leo services (Instance: $INSTANCE_GUID)..."
 
@@ -65,8 +75,22 @@ uv run python agent/agent.py &
 AGENT_PID=$!
 echo "      Agent server started (PID: $AGENT_PID)"
 
-# Give the agent server a moment to start
-sleep 2
+# Wait for the agent socket to actually appear rather than guessing with
+# `sleep 2` — the bridge drops messages if it starts first.
+echo "      Waiting for agent socket..."
+for _ in $(seq 1 60); do
+    [ -S "$AGENT_SOCKET_PATH" ] && break
+    if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+        echo "      Agent exited before creating its socket; aborting." >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+if [ ! -S "$AGENT_SOCKET_PATH" ]; then
+    echo "      Agent socket did not appear at $AGENT_SOCKET_PATH; aborting." >&2
+    exit 1
+fi
+echo "      Agent socket ready"
 
 # Start the Go WhatsApp bridge server
 if [ "$IS_TEST_MODE" != "true" ]; then

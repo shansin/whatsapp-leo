@@ -12,7 +12,7 @@ def _load_instructions():
         logger.warning(f"instructions.txt not found at {instr_path}")
         return "", "", "", "", ""
 
-    with open(instr_path, "r") as f:
+    with open(instr_path) as f:
         content = f.read()
 
     sections = {}

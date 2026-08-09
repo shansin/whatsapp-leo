@@ -4,16 +4,35 @@ import asyncio
 from datetime import datetime
 
 from agents import Agent, Runner, trace, SQLiteSession
+from agents.exceptions import AgentsException, ModelBehaviorError
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from config import (
-    _cached_model,
-    mcp_stack,
-)
+from config import TRACING_ENABLED, _cached_model
+from mcp_pool import mcp_pool
 from instructions import INSTRUCTIONS_PRIVILEGED_TEMPLATE
 from agent_factory import TZ
 from logging_setup import logger
 
 MAX_BRIEFING_RETRIES = 3
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True for transient failures worth another attempt.
+
+    Matching on ``"500" in str(e)`` used to also catch, say, a briefing that
+    merely mentioned the number 500 in an error message.
+    """
+    if isinstance(
+        exc,
+        (APIConnectionError, APITimeoutError, asyncio.TimeoutError, ModelBehaviorError),
+    ):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code is not None and exc.status_code >= 500
+    # MCP tool plumbing wraps transport failures in AgentsException.
+    if isinstance(exc, AgentsException):
+        return True
+    return False
 
 
 async def execute_briefing_prompt(
@@ -28,12 +47,12 @@ async def execute_briefing_prompt(
     malformed tool-call JSON causing 500s).
     """
     now = datetime.now(TZ)
-    current_time = now.strftime("%I:%M %p PST, %B %d, %Y")
+    current_time = now.strftime("%I:%M %p %Z, %A %B %d, %Y")
 
     # Use privileged instructions for briefings (they run as system tasks)
     # Add explicit briefing output instructions
     briefing_output_rule = """
-**BRIEFING OUTPUT RULE**: This is an automated briefing. Return ONLY plain text formatted for WhatsApp. 
+**BRIEFING OUTPUT RULE**: This is an automated briefing. Return ONLY plain text formatted for WhatsApp.
 NO JSON, NO XML, NO code blocks, NO raw API responses. Use emojis, bullet points (* ), bold (*text*), and clear formatting.
 If any tool call fails or returns an error, skip that section gracefully and continue with the rest of the briefing.
 
@@ -53,40 +72,43 @@ If any tool call fails or returns an error, skip that section gracefully and con
     last_error = None
     for attempt in range(1, MAX_BRIEFING_RETRIES + 1):
         try:
-            async with mcp_stack(is_privileged=True) as mcp_servers:
-                # Create a fresh agent for each attempt (avoids poisoned conversation state)
-                briefing_agent = Agent(
-                    name=f"LeoBriefing-{briefing_name}",
-                    instructions=instructions,
-                    mcp_servers=mcp_servers,
-                    model=_cached_model,
-                )
+            await mcp_pool.ensure_started()
 
-                # Fresh session per attempt so retries don't replay the broken tool call
-                session = SQLiteSession(f"briefing:{briefing_name}:{attempt}")
+            # Create a fresh agent for each attempt (avoids poisoned conversation state)
+            briefing_agent = Agent(
+                name=f"LeoBriefing-{briefing_name}",
+                instructions=instructions,
+                mcp_servers=mcp_pool.servers(is_privileged=True),
+                model=_cached_model,
+            )
 
-                with trace("LeoBriefing"):
-                    result = await Runner.run(briefing_agent, prompt, session=session)
+            # Fresh session per attempt so retries don't replay the broken tool
+            # call. Deliberately in-memory: a briefing carries no history worth
+            # keeping, and persisting one row set per attempt would only grow
+            # sessions.db forever.
+            session = SQLiteSession(f"briefing:{briefing_name}:{attempt}")
 
-                # Extract the final output
-                if result.final_output is None:
-                    return "No briefing content generated."
+            with trace("LeoBriefing", disabled=not TRACING_ENABLED):
+                result = await Runner.run(briefing_agent, prompt, session=session)
 
-                output = result.final_output
-                if not isinstance(output, str):
-                    if hasattr(output, "model_dump"):
-                        output = str(output.model_dump())
-                    elif hasattr(output, "__dict__"):
-                        output = str(output.__dict__)
-                    else:
-                        output = str(output)
+            # Extract the final output
+            if result.final_output is None:
+                return "No briefing content generated."
 
-                return output
+            output = result.final_output
+            if not isinstance(output, str):
+                if hasattr(output, "model_dump"):
+                    output = str(output.model_dump())
+                elif hasattr(output, "__dict__"):
+                    output = str(output.__dict__)
+                else:
+                    output = str(output)
+
+            return output
 
         except Exception as e:
             last_error = e
-            is_retryable = "500" in str(e) or "parsing" in str(e).lower()
-            if is_retryable and attempt < MAX_BRIEFING_RETRIES:
+            if _is_retryable(e) and attempt < MAX_BRIEFING_RETRIES:
                 wait = 2 ** attempt  # 2s, 4s
                 logger.warning(
                     f"Briefing '{briefing_name}' attempt {attempt}/{MAX_BRIEFING_RETRIES} "

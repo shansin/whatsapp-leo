@@ -16,7 +16,13 @@ load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+# The Go bridge writes to <repo>/store/messages.db (it runs from
+# whatsapp-mcp/whatsapp-bridge/ and opens ../../store/messages.db). This used to
+# point at whatsapp-bridge/store/, which is empty, so every query here returned
+# nothing. Override with MESSAGES_DB_PATH if you relocate the store.
+MESSAGES_DB_PATH = os.getenv("MESSAGES_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'store', 'messages.db'
+)
 
 # Get instance GUID for multi-instance support  
 INSTANCE_GUID = os.getenv("INSTANCE_GUID", "default")
@@ -709,6 +715,34 @@ def send_message(recipient: str, message: str, reply_to: Optional[str] = None, r
         else:
             return False, f"Error: HTTP {status_code} - {result}"
             
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+def send_presence(recipient: str, state: str = "composing", media: str = "") -> Tuple[bool, str]:
+    """Publish a typing indicator for a chat.
+
+    Args:
+        recipient: chat JID or phone number
+        state: "composing" to show typing, "paused" to clear it
+        media: "" for text, "audio" for the recording indicator
+    """
+    try:
+        if not recipient:
+            return False, "Recipient must be provided"
+
+        payload = {"recipient": recipient, "state": state}
+        if media:
+            payload["media"] = media
+
+        status_code, result = make_api_request("/api/presence", payload)
+
+        if status_code == 200:
+            return result.get("success", False), result.get("message", "Unknown response")
+        elif status_code == 0:
+            return False, result.get("error", "Connection failed")
+        else:
+            return False, f"Error: HTTP {status_code} - {result}"
+
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 

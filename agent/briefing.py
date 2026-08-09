@@ -5,16 +5,17 @@ import sqlite3
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import Callable, Any
+from datetime import datetime
+from typing import Any
+from collections.abc import Callable
 from croniter import croniter
 
 from config import TZ
+from sqlite_store import PollingScheduler, SqliteStore
+from timeutil import normalize_columns, now_db, resolve_tz, to_db
 
 logger = logging.getLogger("Briefing")
 
-_db_conn: sqlite3.Connection | None = None
-_db_migrated = False
 DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "store", "briefings.db"
 )
@@ -23,35 +24,43 @@ POLL_INTERVAL = int(os.getenv("BRIEFING_POLL_INTERVAL", "60"))
 # ── Persistence ──────────────────────────────────────────────────────────────
 
 
+def _migrate_briefings(conn: sqlite3.Connection) -> None:
+    """Create the briefing schema and bring old rows up to date."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS briefings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            schedule_cron TEXT NOT NULL,
+            chat_jid TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            last_run_at TEXT,
+            next_run_at TEXT NOT NULL,
+            tz TEXT
+        )
+    """)
+    conn.commit()
+    # Older databases predate the tz column.
+    try:
+        conn.execute("ALTER TABLE briefings ADD COLUMN tz TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_briefings_enabled_next_run
+        ON briefings(enabled, next_run_at)
+    """)
+    conn.commit()
+    # Existing rows may hold local-offset timestamps; see timeutil.
+    normalize_columns(conn, "briefings", ["next_run_at", "last_run_at"])
+
+
+_store = SqliteStore(lambda: DB_PATH, _migrate_briefings)
+
+
 def _get_db() -> sqlite3.Connection:
-    """Return a singleton connection with WAL mode, migrating schema on first call."""
-    global _db_conn, _db_migrated
-    if _db_conn is None:
-        _db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _db_conn.execute("PRAGMA journal_mode=WAL")
-        _db_conn.execute("PRAGMA synchronous=NORMAL")
-    if not _db_migrated:
-        _db_conn.execute("""
-            CREATE TABLE IF NOT EXISTS briefings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                schedule_cron TEXT NOT NULL,
-                chat_jid TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                last_run_at TEXT,
-                next_run_at TEXT NOT NULL
-            )
-        """)
-        _db_conn.commit()
-        _db_conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_briefings_enabled_next_run
-            ON briefings(enabled, next_run_at)
-        """)
-        _db_conn.commit()
-        _db_migrated = True
-    return _db_conn
+    return _store.connect()
 
 
 def store_briefing(
@@ -60,19 +69,25 @@ def store_briefing(
     schedule_cron: str,
     chat_jid: str,
     next_run_at: datetime,
+    tz_name: str = "",
 ) -> int:
-    """Insert a new briefing. Returns its row id."""
+    """Insert a new briefing. Returns its row id.
+
+    ``tz_name`` is the creator's timezone, so "9am everyday" keeps meaning 9am
+    where they are rather than on the server.
+    """
     conn = _get_db()
     cur = conn.execute(
-        "INSERT INTO briefings (name, prompt, schedule_cron, chat_jid, enabled, created_at, next_run_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO briefings (name, prompt, schedule_cron, chat_jid, enabled, created_at, next_run_at, tz) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             name,
             prompt,
             schedule_cron,
             chat_jid,
             1,
-            datetime.now(TZ).isoformat(),
-            next_run_at.isoformat(),
+            to_db(datetime.now(TZ)),
+            to_db(next_run_at),
+            tz_name or str(TZ),
         ),
     )
     conn.commit()
@@ -85,7 +100,7 @@ def store_briefing(
 def get_due_briefings() -> list:
     """Return all enabled briefings whose next_run_at <= now."""
     conn = _get_db()
-    now_iso = datetime.now(TZ).isoformat()
+    now_iso = now_db()
     rows = conn.execute(
         "SELECT id, name, prompt, schedule_cron, chat_jid, last_run_at, next_run_at FROM briefings WHERE enabled = 1 AND next_run_at <= ?",
         (now_iso,),
@@ -100,7 +115,7 @@ def update_briefing_schedule(
     conn = _get_db()
     conn.execute(
         "UPDATE briefings SET last_run_at = ?, next_run_at = ? WHERE id = ?",
-        (last_run_at.isoformat(), next_run_at.isoformat(), briefing_id),
+        (to_db(last_run_at), to_db(next_run_at), briefing_id),
     )
     conn.commit()
 
@@ -109,7 +124,7 @@ def get_all_briefings() -> list:
     """Return all briefings."""
     conn = _get_db()
     rows = conn.execute(
-        "SELECT id, name, prompt, schedule_cron, chat_jid, enabled, created_at, last_run_at, next_run_at FROM briefings ORDER BY id"
+        "SELECT id, name, prompt, schedule_cron, chat_jid, enabled, created_at, last_run_at, next_run_at, tz FROM briefings ORDER BY id"
     ).fetchall()
     return rows
 
@@ -226,8 +241,10 @@ def get_next_run_from_cron(
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
 
-class BriefingScheduler:
-    """Async background loop that executes due briefings."""
+class BriefingScheduler(PollingScheduler):
+    """Executes due briefings and advances them to their next occurrence."""
+
+    name = "Briefing scheduler"
 
     def __init__(
         self,
@@ -238,85 +255,62 @@ class BriefingScheduler:
         execute_fn: async function(prompt, chat_jid, briefing_name) -> result_text
         send_fn: function(chat_jid, message, reply_to, reply_to_sender) -> (bool, result)
         """
+        super().__init__(_store, POLL_INTERVAL)
         self._execute_fn = execute_fn
         self._send_fn = send_fn
 
-    def _ensure_conn(self) -> sqlite3.Connection:
-        return _get_db()
+    @staticmethod
+    def _record_run(
+        conn: sqlite3.Connection, briefing_id: int, now: datetime, next_run: datetime
+    ) -> None:
+        conn.execute(
+            "UPDATE briefings SET last_run_at = ?, next_run_at = ? WHERE id = ?",
+            (to_db(now), to_db(next_run), briefing_id),
+        )
+        conn.commit()
 
-    async def run(self):
-        """Poll every 60 seconds for due briefings and execute them."""
-        logger.info("Briefing scheduler started")
+    async def poll(self) -> None:
+        conn = self.conn()
+        now_iso = now_db()
+        rows = await asyncio.to_thread(
+            lambda: conn.execute(
+                "SELECT id, name, prompt, schedule_cron, chat_jid, tz FROM briefings "
+                "WHERE enabled = 1 AND next_run_at <= ?",
+                (now_iso,),
+            ).fetchall()
+        )
 
-        while True:
+        for briefing_id, name, prompt, schedule_cron, chat_jid, tz_name in rows:
+            logger.info(f"Executing briefing '{name}' for {chat_jid}")
             try:
-                conn = self._ensure_conn()
-                now_iso = datetime.now(TZ).isoformat()
-                rows = conn.execute(
-                    "SELECT id, name, prompt, schedule_cron, chat_jid, last_run_at, next_run_at FROM briefings WHERE enabled = 1 AND next_run_at <= ?",
-                    (now_iso,),
-                ).fetchall()
-
-                for (
-                    briefing_id,
-                    name,
-                    prompt,
-                    schedule_cron,
-                    chat_jid,
-                    last_run_at,
-                    next_run_at,
-                ) in rows:
-                    logger.info(f"Executing briefing '{name}' for {chat_jid}")
-
-                    try:
-                        # Execute the briefing prompt through the AI
-                        result_text = await self._execute_fn(prompt, chat_jid, name)
-
-                        # Send the result
-                        header = f"📋 *{name}*\n\n"
-                        full_message = header + result_text
-
-                        success, send_result = self._send_fn(
-                            chat_jid,
-                            full_message,
-                            None,
-                            None,
-                        )
-
-                        if success:
-                            # Calculate next run time
-                            now = datetime.now(TZ)
-                            next_run = get_next_run_from_cron(schedule_cron, now)
-
-                            conn.execute(
-                                "UPDATE briefings SET last_run_at = ?, next_run_at = ? WHERE id = ?",
-                                (now.isoformat(), next_run.isoformat(), briefing_id),
-                            )
-                            conn.commit()
-                            logger.info(
-                                f"Briefing '{name}' executed and next run scheduled for {next_run}"
-                            )
-                        else:
-                            logger.error(
-                                f"Failed to send briefing '{name}': {send_result}"
-                            )
-
-                    except Exception as exec_err:
-                        logger.exception(
-                            f"Error executing briefing '{name}': {exec_err}"
-                        )
-
-            except sqlite3.OperationalError:
-                global _db_conn, _db_migrated
-                logger.warning(
-                    "DB connection error in briefing scheduler, reconnecting"
+                await self._run_one(
+                    conn, briefing_id, name, prompt, schedule_cron, chat_jid, tz_name
                 )
-                _db_conn = None
-                _db_migrated = False
-            except Exception:
-                logger.exception("Error in briefing scheduler loop")
+            except Exception as exec_err:
+                # One bad briefing must not stop the others.
+                logger.exception(f"Error executing briefing '{name}': {exec_err}")
 
-            await asyncio.sleep(POLL_INTERVAL)
+    async def _run_one(
+        self, conn, briefing_id, name, prompt, schedule_cron, chat_jid, tz_name
+    ) -> None:
+        result_text = await self._execute_fn(prompt, chat_jid, name)
+
+        # send_fn blocks on a socket with a 30s timeout — keep it off the
+        # event loop or every message stalls behind it.
+        success, send_result = await asyncio.to_thread(
+            self._send_fn, chat_jid, f"📋 *{name}*\n\n{result_text}", None, None
+        )
+        if not success:
+            logger.error(f"Failed to send briefing '{name}': {send_result}")
+            return
+
+        # Advance the schedule in the timezone it was written in.
+        now = datetime.now(resolve_tz(tz_name))
+        next_run = get_next_run_from_cron(schedule_cron, now)
+        await asyncio.to_thread(self._record_run, conn, briefing_id, now, next_run)
+        logger.info(
+            f"Briefing '{name}' executed and next run scheduled for {next_run}"
+        )
 
 
 # ── Briefing Management Functions ───────────────────────────────────────────
@@ -327,6 +321,7 @@ def add_briefing(
     prompt: str,
     schedule: str,
     chat_jid: str,
+    tz=None,
 ) -> tuple[int, str]:
     """
     Add a new briefing.
@@ -341,9 +336,12 @@ def add_briefing(
         (briefing_id, cron_expression)
     """
     try:
+        tz = tz or TZ
         cron_expr = parse_schedule_to_cron(schedule)
-        next_run = get_next_run_from_cron(cron_expr)
-        briefing_id = store_briefing(name, prompt, cron_expr, chat_jid, next_run)
+        next_run = get_next_run_from_cron(cron_expr, datetime.now(tz))
+        briefing_id = store_briefing(
+            name, prompt, cron_expr, chat_jid, next_run, tz_name=str(tz)
+        )
         return (briefing_id, cron_expr)
     except Exception as e:
         raise ValueError(f"Failed to create briefing: {e}") from e
@@ -363,6 +361,7 @@ def list_briefings() -> list[dict]:
             "created_at": row[6],
             "last_run_at": row[7],
             "next_run_at": row[8],
+            "tz": row[9],
         }
         for row in rows
     ]

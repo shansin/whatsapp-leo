@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python (lint + tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Lint
+        run: uv run ruff check agent/ tests/ scripts/
+
+      - name: Format check
+        run: uv run ruff format --check --diff agent/ tests/ scripts/
+        continue-on-error: true  # formatting is advisory until the tree is fully formatted
+
+      - name: Type check
+        run: uv run mypy
+        continue-on-error: true  # advisory: the tree is only partly annotated
+
+      - name: Tests
+        run: uv run pytest -q
+
+  go:
+    name: Go bridge (vet + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whatsapp-mcp/whatsapp-bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: whatsapp-mcp/whatsapp-bridge/go.mod
+          cache-dependency-path: whatsapp-mcp/whatsapp-bridge/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n setup.sh
+          bash -n start_services.sh
+      - name: shellcheck
+        run: shellcheck -S error setup.sh start_services.sh
+        continue-on-error: true

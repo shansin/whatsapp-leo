@@ -53,14 +53,37 @@ type MessageStore struct {
 }
 
 // Initialize message store
+// getMessagesDBPath returns the shared messages database path. The default is
+// relative to this binary's working directory (whatsapp-mcp/whatsapp-bridge),
+// so MESSAGES_DB_PATH is what keeps the bridge and the Python side pointed at
+// the same file when either is launched from somewhere else.
+func getMessagesDBPath() string {
+	if path := os.Getenv("MESSAGES_DB_PATH"); path != "" {
+		return strings.Trim(path, `"'`)
+	}
+	return filepath.Join(getStoreDir(), "messages.db")
+}
+
+// getStoreDir returns the shared store directory (databases and chat media).
+// Defaults relative to this binary's working directory
+// (whatsapp-mcp/whatsapp-bridge), matching agent/config.py's STORE_DIR.
+func getStoreDir() string {
+	if dir := os.Getenv("STORE_DIR"); dir != "" {
+		return strings.Trim(dir, `"'`)
+	}
+	return "../../store"
+}
+
 func NewMessageStore() (*MessageStore, error) {
+	dbPath := getMessagesDBPath()
+
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("../../store", 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:../../store/messages.db?_foreign_keys=on")
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -275,6 +298,13 @@ type SendMessageResponse struct {
 	Message string `json:"message"`
 }
 
+// SendPresenceRequest represents the request body for the chat presence API
+type SendPresenceRequest struct {
+	Recipient string `json:"recipient"`
+	State     string `json:"state"`           // "composing" or "paused"
+	Media     string `json:"media,omitempty"` // "" (text) or "audio"
+}
+
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
 	Recipient     string `json:"recipient"`
@@ -284,58 +314,93 @@ type SendMessageRequest struct {
 	ReplyToSender string `json:"reply_to_sender,omitempty"`
 }
 
+// resolveRecipientJID turns an API "recipient" (bare phone number, plain JID or
+// @lid) into a JID that can be addressed. LID is a privacy-focused identifier
+// that cannot be used for sending directly, so it is mapped back to the real
+// phone number JID via the store.
+func resolveRecipientJID(client *whatsmeow.Client, recipient string) (types.JID, error) {
+	// Bare phone number
+	if !strings.Contains(recipient, "@") {
+		return types.JID{User: recipient, Server: "s.whatsapp.net"}, nil
+	}
+
+	if !strings.HasSuffix(recipient, "@lid") {
+		jid, err := types.ParseJID(recipient)
+		if err != nil {
+			return types.JID{}, fmt.Errorf("error parsing JID: %v", err)
+		}
+		return jid, nil
+	}
+
+	lidJID, parseErr := types.ParseJID(recipient)
+	if parseErr != nil {
+		return types.JID{}, fmt.Errorf("error parsing LID JID: %v", parseErr)
+	}
+
+	pnJID, lookupErr := client.Store.LIDs.GetPNForLID(context.Background(), lidJID)
+	if lookupErr != nil {
+		// Fallback: try using the LID user part as phone number (might work in some cases)
+		fmt.Printf("[WARN] Could not resolve LID to PN: %v. Trying fallback with user part.\n", lookupErr)
+		user := strings.TrimSuffix(recipient, "@lid")
+		fallback := types.JID{User: user, Server: "s.whatsapp.net"}
+		fmt.Printf("[DEBUG] Fallback: Using user part as phone: %s -> %s\n", recipient, fallback.String())
+		return fallback, nil
+	}
+
+	fmt.Printf("[DEBUG] Resolved LID to PN: %s -> %s\n", recipient, pnJID.String())
+	return pnJID, nil
+}
+
+// sendChatPresence publishes a typing indicator ("composing") or clears it
+// ("paused") for a chat, so a slow model run looks intentional to the user.
+func sendChatPresence(client *whatsmeow.Client, recipient string, state string, media string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp"
+	}
+
+	var presence types.ChatPresence
+	switch state {
+	case "composing":
+		presence = types.ChatPresenceComposing
+	case "paused":
+		presence = types.ChatPresencePaused
+	default:
+		return false, fmt.Sprintf("Invalid presence state: %s (want composing or paused)", state)
+	}
+
+	presenceMedia := types.ChatPresenceMediaText
+	if media == "audio" {
+		presenceMedia = types.ChatPresenceMediaAudio
+	}
+
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
+	}
+
+	// Chat presence is only broadcast while we are marked available, and the
+	// server needs our push name. Cheap enough to (re)assert every time.
+	if presence == types.ChatPresenceComposing {
+		if err := client.SendPresence(context.Background(), types.PresenceAvailable); err != nil {
+			fmt.Printf("[WARN] Could not send available presence: %v\n", err)
+		}
+	}
+
+	if err := client.SendChatPresence(context.Background(), recipientJID, presence, presenceMedia); err != nil {
+		return false, fmt.Sprintf("Error sending chat presence: %v", err)
+	}
+	return true, fmt.Sprintf("Presence %s sent to %s", state, recipientJID.String())
+}
+
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, replyTo string, replyToSender string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
 
-	// Create JID for recipient
-	var recipientJID types.JID
-	var err error
-
-	// Check if recipient is a JID
-	isJID := strings.Contains(recipient, "@")
-
-	if isJID {
-		// Handle @lid (Linked ID) format - need to look up the actual phone number
-		// LID is a privacy-focused identifier that cannot be used for sending messages directly
-		// The LID number is NOT a phone number - we must look up the real PN from the store
-		if strings.HasSuffix(recipient, "@lid") {
-			// Parse the LID JID first
-			lidJID, parseErr := types.ParseJID(recipient)
-			if parseErr != nil {
-				return false, fmt.Sprintf("Error parsing LID JID: %v", parseErr)
-			}
-
-			// Look up the actual phone number from the LID mapping
-			pnJID, lookupErr := client.Store.LIDs.GetPNForLID(context.Background(), lidJID)
-			if lookupErr != nil {
-				// Fallback: try using the LID user part as phone number (might work in some cases)
-				fmt.Printf("[WARN] Could not resolve LID to PN: %v. Trying fallback with user part.\n", lookupErr)
-				user := strings.TrimSuffix(recipient, "@lid")
-				recipientJID = types.JID{
-					User:   user,
-					Server: "s.whatsapp.net",
-				}
-				fmt.Printf("[DEBUG] Fallback: Using user part as phone: %s -> %s\n", recipient, recipientJID.String())
-			} else {
-				recipientJID = pnJID
-				fmt.Printf("[DEBUG] Resolved LID to PN: %s -> %s\n", recipient, recipientJID.String())
-			}
-		} else {
-			// Parse the JID string
-			recipientJID, err = types.ParseJID(recipient)
-			if err != nil {
-				return false, fmt.Sprintf("Error parsing JID: %v", err)
-			}
-		}
-	} else {
-		// Create JID from phone number
-		recipientJID = types.JID{
-			User:   recipient,
-			Server: "s.whatsapp.net", // For personal chats
-		}
+	recipientJID, err := resolveRecipientJID(client, recipient)
+	if err != nil {
+		return false, err.Error()
 	}
 
 	msg := &waProto.Message{}
@@ -798,7 +863,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var err error
 
 	// First, check if we already have this file
-	chatDir := fmt.Sprintf("../../store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := filepath.Join(getStoreDir(), strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
 
 	// Get media info from the database
@@ -950,27 +1015,40 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + path + "?" + strings.Join(kept, "&")
 }
 
+// getRuntimeDir returns the directory holding the Unix sockets.
+// $XDG_RUNTIME_DIR is per-user and mode 700, unlike world-writable /tmp.
+// Mirrored in agent/config.py (runtime_dir) and start_services.sh.
+func getRuntimeDir() string {
+	xdg := strings.Trim(os.Getenv("XDG_RUNTIME_DIR"), `"'`)
+	if xdg != "" {
+		if info, err := os.Stat(xdg); err == nil && info.IsDir() {
+			return xdg
+		}
+	}
+	return "/tmp"
+}
+
+func instanceGUID() string {
+	guid := strings.Trim(os.Getenv("INSTANCE_GUID"), `"'`)
+	if guid == "" {
+		guid = "default"
+	}
+	return guid
+}
+
 // Get socket paths from environment with defaults (supports multi-instance via INSTANCE_GUID)
 func getBridgeSocketPath() string {
 	if path := os.Getenv("BRIDGE_SOCKET_PATH"); path != "" {
 		return strings.Trim(path, `"'`)
 	}
-	guid := strings.Trim(os.Getenv("INSTANCE_GUID"), `"'`)
-	if guid == "" {
-		guid = "default"
-	}
-	return fmt.Sprintf("/tmp/whatsapp-bridge-%s.sock", guid)
+	return filepath.Join(getRuntimeDir(), fmt.Sprintf("whatsapp-bridge-%s.sock", instanceGUID()))
 }
 
 func getAgentSocketPath() string {
 	if path := os.Getenv("AGENT_SOCKET_PATH"); path != "" {
 		return strings.Trim(path, `"'`)
 	}
-	guid := strings.Trim(os.Getenv("INSTANCE_GUID"), `"'`)
-	if guid == "" {
-		guid = "default"
-	}
-	return fmt.Sprintf("/tmp/whatsapp-leo-%s.sock", guid)
+	return filepath.Join(getRuntimeDir(), fmt.Sprintf("whatsapp-leo-%s.sock", instanceGUID()))
 }
 
 // Start a REST API server to expose the WhatsApp client functionality via Unix socket
@@ -1018,6 +1096,39 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Send response
+		json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	})
+
+	// Handler for the typing indicator
+	mux.HandleFunc("/api/presence", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req SendPresenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if req.State == "" {
+			req.State = "composing"
+		}
+
+		success, message := sendChatPresence(client, req.Recipient, req.State, req.Media)
+
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 		json.NewEncoder(w).Encode(SendMessageResponse{
 			Success: success,
 			Message: message,
@@ -1088,8 +1199,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		return
 	}
 
-	// Set socket permissions so other processes can connect
-	if err := os.Chmod(bridgeSocketPath, 0666); err != nil {
+	// Owner-only: the agent runs as the same user, and this socket accepts
+	// send/download requests that must not be reachable by other local users.
+	if err := os.Chmod(bridgeSocketPath, 0600); err != nil {
 		fmt.Printf("Warning: Failed to set socket permissions: %v\n", err)
 	}
 
@@ -1117,13 +1229,16 @@ func main() {
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
-	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	// Create directory for database if it doesn't exist. This used to create a
+	// stray "store" beside the binary while the session DB was written to
+	// ../../store, so a fresh checkout only worked by accident.
+	if err := os.MkdirAll(getStoreDir(), 0755); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
 
-	container, err := sqlstore.New(context.Background(), "sqlite3", "file:../../store/whatsapp.db?_foreign_keys=on", dbLog)
+	whatsappDBPath := filepath.Join(getStoreDir(), "whatsapp.db")
+	container, err := sqlstore.New(context.Background(), "sqlite3", fmt.Sprintf("file:%s?_foreign_keys=on", whatsappDBPath), dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return

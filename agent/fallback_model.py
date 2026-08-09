@@ -91,6 +91,15 @@ class FallbackModel(Model):
         self._router = router
         self._timeout = primary_timeout_seconds
 
+    @property
+    def model(self) -> str:
+        """Stable model identifier.
+
+        The agent cache keys on this; without it the key fell back to repr(),
+        which embeds the object address.
+        """
+        return getattr(self._primary, "model", None) or type(self._primary).__name__
+
     async def get_response(self, *args: Any, **kwargs: Any):
         if self._backup is None:
             return await self._primary.get_response(*args, **kwargs)
