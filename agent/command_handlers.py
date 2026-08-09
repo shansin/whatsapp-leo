@@ -493,6 +493,130 @@ async def handle_tz_command(message: ReceivedMessage):
     logger.info(f"Timezone for {message.phone_number} set to {tz}")
 
 
+# ── #model ──────────────────────────────────────────────────────────────────
+
+
+MODEL_HELP = """🤖 *Model*
+• `#model` — list the models Ollama has installed
+• `#model set <name>` — switch the main text model
+• `#model vision <name>` — switch the vision model
+• `#model reset` — back to the .env defaults
+
+_The switch is instance-wide (chats, briefings, reminders) and survives a
+restart._"""
+
+
+async def _switch_model(message: ReceivedMessage, name: str, *, vision: bool) -> None:
+    """Validate `name` against Ollama, then switch and persist it."""
+    import model_override
+    import ollama_models
+    from agent_factory import agent_factory
+
+    try:
+        available = await ollama_models.list_models()
+    except Exception as e:
+        logger.error(f"Could not list Ollama models: {e}")
+        await _reply(message, f"❌ Couldn't reach Ollama to check that model: {e}")
+        return
+
+    # An unrecognised name would 404 on every subsequent message with no
+    # obvious cause, so refuse it here and show what is actually installed.
+    resolved = ollama_models.resolve(name, available)
+    if not resolved:
+        options = ollama_models.candidates(name, available) or available
+        header = (
+            f"❓ *{name}* is ambiguous — which one?"
+            if len(options) < len(available)
+            else f"❌ No installed model matches *{name}*.\n\nAvailable:"
+        )
+        await _reply(
+            message, header + "\n" + "\n".join(f"• `{m}`" for m in options)
+        )
+        return
+
+    label = "Vision model" if vision else "Model"
+    previous = config.VISION_MODEL_NAME if vision else config.MODEL_NAME
+    if vision:
+        config.set_vision_model(resolved)
+        model_override.set_vision(resolved)
+    else:
+        config.set_text_model(resolved)
+        model_override.set_text(resolved)
+    agent_factory.clear()
+
+    await _reply(message, f"✅ {label}: `{previous}` → `{resolved}`")
+
+
+async def _reset_models(message: ReceivedMessage) -> None:
+    """Drop the override and go back to what .env says."""
+    import os
+
+    import model_override
+    from agent_factory import agent_factory
+
+    text = os.getenv("MODEL_NAME")
+    vision = os.getenv("VISION_MODEL_NAME", "gemma3:27b")
+    model_override.clear()
+    if text:
+        config.set_text_model(text)
+    config.set_vision_model(vision)
+    agent_factory.clear()
+
+    await _reply(
+        message, f"✅ Back to the configured defaults — `{text}` / vision `{vision}`."
+    )
+
+
+async def _list_models(message: ReceivedMessage) -> None:
+    import ollama_models
+
+    try:
+        available = await ollama_models.list_models()
+    except Exception as e:
+        logger.error(f"Could not list Ollama models: {e}")
+        await _reply(message, f"❌ Couldn't reach Ollama: {e}")
+        return
+
+    if not available:
+        await _reply(message, "🤖 Ollama reports no installed models.")
+        return
+
+    lines = ["🤖 *Installed models*\n"]
+    for name in available:
+        marks = ""
+        if name == config.MODEL_NAME:
+            marks += " ✅"
+        if name == config.VISION_MODEL_NAME:
+            marks += " 👁"
+        lines.append(f"• `{name}`{marks}")
+    lines.append("\n✅ main · 👁 vision")
+    lines.append("_Switch with: #model set <name>_")
+    await _reply(message, "\n".join(lines))
+
+
+async def handle_model_command(message: ReceivedMessage):
+    """Handle #model — list installed Ollama models and switch the active one."""
+    parts = message.content.strip().split(maxsplit=2)
+    subcommand = parts[1].lower() if len(parts) > 1 else "list"
+
+    if subcommand in ("list", "ls"):
+        await _list_models(message)
+    elif subcommand == "help":
+        await _reply(message, MODEL_HELP)
+    elif subcommand == "reset":
+        await _reset_models(message)
+    elif subcommand in ("set", "vision"):
+        if len(parts) < 3 or not parts[2].strip():
+            await _reply(message, f"❌ Usage: #model {subcommand} <name>")
+            return
+        await _switch_model(
+            message, parts[2].strip(), vision=(subcommand == "vision")
+        )
+    else:
+        # Bare `#model <name>` — the obvious shorthand for `#model set <name>`.
+        await _switch_model(message, " ".join(parts[1:]).strip(), vision=False)
+
+
 # ── #help (item 14) ─────────────────────────────────────────────────────────
 
 
@@ -518,6 +642,11 @@ HELP_TEXT = """🦁 *Leo — Commands*
 
 *🌍 Timezone*
 • `#tz` — show yours · `#tz Europe/London` — set it
+
+*🤖 Model*
+• `#model` — list installed Ollama models
+• `#model set <name>` — switch the main model · `#model vision <name>`
+• `#model reset` — back to the configured defaults
 
 *🩺 Diagnostics*
 • `#status` — model in use, MCP servers, uptime, recent errors

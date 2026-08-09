@@ -4,16 +4,12 @@ import time
 import asyncio
 from dataclasses import asdict
 
-import httpx
 import gradio as gr
-from agents import OpenAIChatCompletionsModel
 
 from config import (
-    OLLAMA_BASE_URL,
     MODEL_NAME,
     ALLOWED_SENDERS,
     IS_DEDICATED_NUMBER,
-    _openai_client,
 )
 from models import ReceivedMessage
 from agent_factory import agent_factory
@@ -23,17 +19,13 @@ from logging_setup import logger, log_deque
 from whatsapp import send_message as whatsapp_send_message
 from reminder import ReminderScheduler, RecurringReminderScheduler
 from briefing import BriefingScheduler
+import ollama_models
 
 
 def get_ollama_models():
-    """Fetch available model names from the local Ollama instance."""
+    """Model names from the local Ollama, or a usable guess if it is unreachable."""
     try:
-        base_url = (OLLAMA_BASE_URL or "http://localhost:11434").rstrip("/")
-        if base_url.endswith("/v1"):
-            base_url = base_url[:-3]
-        resp = httpx.get(f"{base_url}/api/tags", timeout=3.0)
-        resp.raise_for_status()
-        return [m["name"] for m in resp.json().get("models", [])]
+        return ollama_models.list_models_sync()
     except Exception as e:
         logger.error(f"Failed to fetch Ollama models: {e}")
         return [MODEL_NAME] if MODEL_NAME else ["llama3"]
@@ -85,10 +77,10 @@ def start_test_ui():
                 timer.tick(get_logs, inputs=None, outputs=logs_output)
 
         def update_model(new_model):
-            config.MODEL_NAME = new_model
-            config._cached_model = OpenAIChatCompletionsModel(model=new_model, openai_client=_openai_client)
-            logger.info(f"Model swapped to: {new_model}")
-            agent_factory._agents.clear()
+            # Mutates the shared FallbackModel rather than rebinding it, so the
+            # swap reaches briefings and the reminder parser too.
+            config.set_text_model(new_model)
+            agent_factory.clear()
             gr.Info(f"Model updated to {new_model}")
 
         model_dropdown.change(update_model, inputs=[model_dropdown], outputs=[])

@@ -100,6 +100,17 @@ class FallbackModel(Model):
         """
         return getattr(self._primary, "model", None) or type(self._primary).__name__
 
+    def set_primary(self, model: Model) -> None:
+        """Swap the primary model in place, for a live `#model` switch.
+
+        Consumers (message_handler, briefing_executor, the reminder parser) hold
+        this object rather than the inner model, so mutating here is what makes
+        the switch reach all of them. A switch that lands mid-run changes the
+        model between turns of that run; harmless, and draining in-flight runs
+        would cost far more machinery than it is worth.
+        """
+        self._primary = model
+
     async def get_response(self, *args: Any, **kwargs: Any):
         if self._backup is None:
             return await self._primary.get_response(*args, **kwargs)

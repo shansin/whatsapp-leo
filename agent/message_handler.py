@@ -49,6 +49,7 @@ from session_store import trim_session
 from command_handlers import (
     handle_briefing_command,
     handle_help_command,
+    handle_model_command,
     handle_remindme_cancel,
     handle_remindme_list,
     handle_reminder_command,
@@ -223,7 +224,7 @@ async def _transcribe_audio_message(
 # Commands Leo answers. Matched as a prefix on the whole message, so a
 # sentence that merely mentions "#briefing" is treated as normal chat.
 COMMAND_PREFIXES = (
-    "#remindme", "#reminder", "#briefing", "#tz", "#help", "#status",
+    "#remindme", "#reminder", "#briefing", "#tz", "#help", "#status", "#model",
 )
 
 # Reply "snooze 15m" to a fired reminder to push it back.
@@ -394,6 +395,8 @@ async def _handle_commands(message: ReceivedMessage) -> bool:
         await handle_tz_command(message)
     elif command == "#status":
         await handle_status_command(message)
+    elif command == "#model":
+        await handle_model_command(message)
     elif command == "#help":
         await handle_help_command(
             message, hook_names=HOOKS if IS_HOOK_ENABLED else ()

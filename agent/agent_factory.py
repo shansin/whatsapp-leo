@@ -36,6 +36,17 @@ class AgentFactory:
             self._locks[chat_jid] = lock
         return lock
 
+    def clear(self) -> None:
+        """Drop every cached agent, e.g. after a `#model` switch.
+
+        Locks are deliberately kept: they are cheap, and dropping one while a
+        run holds it would let the next message in that chat interleave with it.
+        Sessions live in session_store keyed by chat, so history is unaffected.
+        """
+        count = len(self._agents)
+        self._agents.clear()
+        logger.info(f"Cleared agent cache ({count} entries)")
+
     def _is_expired(self, last_used: float) -> bool:
         """Check if an entry has exceeded the TTL."""
         return (time.time() - last_used) > TTL_SECONDS

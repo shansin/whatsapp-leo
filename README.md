@@ -76,6 +76,12 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - `#tz Europe/London` sets your timezone; `#tz` shows it
 - Reminders, briefings and the clock Leo reports all follow the sender's timezone, falling back to `DEFAULT_TZ`
 
+### 🤖 Live model switching
+- `#model` lists what Ollama actually has installed, marking the active text (✅) and vision (👁) models
+- `#model set <name>` switches the running instance — chats, briefings and reminder parsing all follow — with no restart and no dropped MCP servers
+- The choice is persisted, so it survives a restart; `#model reset` returns to `MODEL_NAME` / `VISION_MODEL_NAME`
+- Unknown names are refused against the installed list, so a typo can't leave Leo 404ing on every message
+
 ### 🪝 Hooks (bidirectional named pipes)
 - Route WhatsApp messages to external programs and receive responses back
 - Each hook creates two FIFOs: `{name}-in.fifo` (WhatsApp → program) and `{name}-out.fifo` (program → WhatsApp)
@@ -589,6 +595,9 @@ CI (`.github/workflows/ci.yml`) runs the same checks on push and PR.
 | `#briefing run <id>` | Run a briefing immediately (test it) |
 | `#briefing pause <id>` / `#briefing resume <id>` | Disable or re-enable a briefing |
 | `#tz` / `#tz Europe/London` | Show or set your timezone |
+| `#model` | List the models Ollama has installed |
+| `#model set <name>` / `#model vision <name>` | Switch the main or vision model live |
+| `#model reset` | Go back to the `MODEL_NAME` / `VISION_MODEL_NAME` defaults |
 | `#status` | Model in use, MCP health, uptime, recent errors |
 | `#hook-name <message>` | Send message to a named hook |
 | `#hook-name #start` | Start a hook session — all messages forwarded to hook |

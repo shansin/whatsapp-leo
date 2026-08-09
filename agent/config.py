@@ -170,6 +170,43 @@ _cached_vision_model = FallbackModel(
     primary_timeout_seconds=OLLAMA_PRIMARY_TIMEOUT_SECONDS,
 )
 
+
+# ── Live model switching (#model) ────────────────────────────────────────────
+# The FallbackModel objects above are imported by value into message_handler,
+# briefing_executor and agent_factory, so a switch has to mutate them in place —
+# rebinding _cached_model here would leave all three on the old model.
+
+
+def set_text_model(name: str) -> None:
+    """Point the primary text model at `name`, for every caller, right now."""
+    global MODEL_NAME
+    _cached_model.set_primary(
+        OpenAIChatCompletionsModel(model=name, openai_client=_openai_client)
+    )
+    MODEL_NAME = name
+    logger.info(f"Text model switched to: {name}")
+
+
+def set_vision_model(name: str) -> None:
+    """Point the primary vision model at `name`, for every caller, right now."""
+    global VISION_MODEL_NAME
+    _cached_vision_model.set_primary(
+        OpenAIChatCompletionsModel(model=name, openai_client=_openai_client)
+    )
+    VISION_MODEL_NAME = name
+    logger.info(f"Vision model switched to: {name}")
+
+
+# Re-apply a persisted `#model` switch. Done here, at import, so nothing
+# downstream ever observes the pre-override model and no cache needs flushing.
+import model_override  # noqa: E402
+
+_override = model_override.load()
+if _override.get("text"):
+    set_text_model(_override["text"])
+if _override.get("vision"):
+    set_vision_model(_override["vision"])
+
 # ── Audio transcription (faster-whisper) ───────────────────────────────────
 # distil-medium.en is several times faster than `medium` on CPU at comparable
 # quality for English. Set WHISPER_MODEL_SIZE=medium for multilingual notes.
