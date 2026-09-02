@@ -184,6 +184,18 @@ async def test_confirmation_turn_allows_the_write(guard_on):
     assert write_guard.refusal("workspace", "calendar.deleteEvent") is None
 
 
+@pytest.mark.parametrize("content", ["#leo yes", "@leo yes", "#Leo, go ahead"])
+async def test_triggered_confirmation_allows_the_write(guard_on, content):
+    """On a shared number the confirmation arrives as "#leo yes"."""
+    write_guard.begin_turn("chat@lid", content)
+    assert write_guard.refusal("workspace", "calendar.createEvent") is None
+
+
+async def test_trigger_alone_is_not_a_confirmation(guard_on):
+    write_guard.begin_turn("chat@lid", "#leo what's next?")
+    assert write_guard.refusal("workspace", "calendar.createEvent")
+
+
 async def test_confirmation_does_not_carry_to_the_next_turn(guard_on):
     write_guard.begin_turn("chat@lid", "yes")
     write_guard.end_turn("chat@lid")

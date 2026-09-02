@@ -69,6 +69,12 @@ _CONFIRMATION = re.compile(
     re.IGNORECASE,
 )
 
+# On a shared number every message to Leo carries a #leo / @leo trigger, so the
+# confirmation arrives as "#leo yes". The trigger is addressing, not content —
+# drop it before matching. Dedicated numbers never carry one, so this is a no-op
+# for them.
+_TRIGGER = re.compile(r"^\s*[#@]leo\b[\s,:!.-]*", re.IGNORECASE)
+
 # The chat whose run is currently executing. Runs are serialized per chat and
 # asyncio tasks inherit the context, so this stays correct under concurrency.
 current_chat: ContextVar[str] = ContextVar("current_chat", default="")
@@ -79,7 +85,7 @@ _confirmed: set[str] = set()
 
 def is_confirmation(content: str) -> bool:
     """True if a message reads as the user approving a pending action."""
-    return bool(_CONFIRMATION.match(content or ""))
+    return bool(_CONFIRMATION.match(_TRIGGER.sub("", content or "")))
 
 
 def begin_turn(chat_jid: str, content: str) -> None:
