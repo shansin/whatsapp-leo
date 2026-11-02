@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from agents import OpenAIChatCompletionsModel, ModelSettings, set_tracing_disabled
+from openai.types.shared import Reasoning
 
 # Ensure logging is configured before anything else
 from logging_setup import logger  # noqa: F401
@@ -16,7 +17,7 @@ load_dotenv(override=True)
 
 # ── Tracing ──────────────────────────────────────────────────────────────────
 # The Agents SDK batches run traces (message content included) and POSTs them
-# to api.openai.com. We talk to a local Ollama with a dummy key, so that is a
+# to api.openai.com. We talk to a local LLM server with a dummy key, so that is a
 # privacy leak plus a stream of background 401 retries. Opt in explicitly via
 # AGENTS_TRACING_ENABLED=true if you ever point this at a real trace backend.
 TRACING_ENABLED = os.getenv("AGENTS_TRACING_ENABLED", "false").lower() == "true"
@@ -70,19 +71,32 @@ SOCKET_PATH = os.getenv("AGENT_SOCKET_PATH") or os.path.join(
 )
 
 # ── Model & agent configuration ─────────────────────────────────────────────
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
+def _llm_env(name: str, default: str | None = None) -> str | None:
+    """Read LLM_<name>, falling back to the pre-SGLang OLLAMA_<name> spelling.
+
+    Any OpenAI-compatible server works (SGLang, vLLM, Ollama's /v1), so the
+    settings are engine-neutral; old .env files keep working unchanged.
+    """
+    return os.getenv(f"LLM_{name}") or os.getenv(f"OLLAMA_{name}") or default
+
+
+LLM_BASE_URL = _llm_env("BASE_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_AGENTS = int(os.getenv("MAX_AGENTS", "20"))
 TTL_SECONDS = int(os.getenv("TTL_SECONDS", "1800"))
 
-# Backup Ollama (degraded fallback when primary fails or stalls)
-OLLAMA_BACKUP_BASE_URL = os.getenv("OLLAMA_BACKUP_BASE_URL") or None
-OLLAMA_BACKUP_MODEL_NAME = os.getenv("OLLAMA_BACKUP_MODEL_NAME") or None
-OLLAMA_BACKUP_VISION_MODEL_NAME = (
-    os.getenv("OLLAMA_BACKUP_VISION_MODEL_NAME") or OLLAMA_BACKUP_MODEL_NAME
+# Unset sends no effort, so the server's default applies (xhigh on the Qwen3.8
+# template). low/medium/xhigh trade answer depth for reply latency.
+LLM_REASONING_EFFORT = _llm_env("REASONING_EFFORT")
+
+# Backup LLM server (degraded fallback when primary fails or stalls)
+LLM_BACKUP_BASE_URL = _llm_env("BACKUP_BASE_URL")
+LLM_BACKUP_MODEL_NAME = _llm_env("BACKUP_MODEL_NAME")
+LLM_BACKUP_VISION_MODEL_NAME = (
+    _llm_env("BACKUP_VISION_MODEL_NAME") or LLM_BACKUP_MODEL_NAME
 )
-OLLAMA_PRIMARY_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_PRIMARY_TIMEOUT_SECONDS", "120"))
-OLLAMA_FALLBACK_STICKY_SECONDS = float(os.getenv("OLLAMA_FALLBACK_STICKY_SECONDS", "300"))
+LLM_PRIMARY_TIMEOUT_SECONDS = float(_llm_env("PRIMARY_TIMEOUT_SECONDS", "120"))
+LLM_FALLBACK_STICKY_SECONDS = float(_llm_env("FALLBACK_STICKY_SECONDS", "300"))
 
 # ── Sender / access control ─────────────────────────────────────────────────
 ALLOWED_SENDERS = [
@@ -116,9 +130,11 @@ X_MCP_PATH = os.path.join(
 )
 
 # ── Cached singletons (avoid re-creation per message) ───────────────────────
-_openai_client = AsyncOpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
+_openai_client = AsyncOpenAI(base_url=LLM_BASE_URL, api_key="local")
 
-_model_settings = ModelSettings()
+_model_settings = ModelSettings(
+    reasoning=Reasoning(effort=LLM_REASONING_EFFORT) if LLM_REASONING_EFFORT else None
+)
 
 _primary_text_model = OpenAIChatCompletionsModel(
     model=MODEL_NAME, openai_client=_openai_client
@@ -134,24 +150,24 @@ _primary_vision_model = OpenAIChatCompletionsModel(
 # ── Backup wiring ────────────────────────────────────────────────────────────
 from fallback_model import FallbackModel, FallbackRouter
 
-_fallback_enabled = bool(OLLAMA_BACKUP_BASE_URL and OLLAMA_BACKUP_MODEL_NAME)
-_fallback_router = FallbackRouter(sticky_seconds=OLLAMA_FALLBACK_STICKY_SECONDS)
+_fallback_enabled = bool(LLM_BACKUP_BASE_URL and LLM_BACKUP_MODEL_NAME)
+_fallback_router = FallbackRouter(sticky_seconds=LLM_FALLBACK_STICKY_SECONDS)
 
 if _fallback_enabled:
     _backup_openai_client = AsyncOpenAI(
-        base_url=OLLAMA_BACKUP_BASE_URL, api_key="ollama"
+        base_url=LLM_BACKUP_BASE_URL, api_key="local"
     )
     _backup_text_model = OpenAIChatCompletionsModel(
-        model=OLLAMA_BACKUP_MODEL_NAME, openai_client=_backup_openai_client
+        model=LLM_BACKUP_MODEL_NAME, openai_client=_backup_openai_client
     )
     _backup_vision_model = OpenAIChatCompletionsModel(
-        model=OLLAMA_BACKUP_VISION_MODEL_NAME, openai_client=_backup_openai_client
+        model=LLM_BACKUP_VISION_MODEL_NAME, openai_client=_backup_openai_client
     )
     logger.info(
-        f"Ollama fallback enabled: backup={OLLAMA_BACKUP_BASE_URL} "
-        f"model={OLLAMA_BACKUP_MODEL_NAME} "
-        f"timeout={OLLAMA_PRIMARY_TIMEOUT_SECONDS}s "
-        f"sticky={OLLAMA_FALLBACK_STICKY_SECONDS}s"
+        f"LLM fallback enabled: backup={LLM_BACKUP_BASE_URL} "
+        f"model={LLM_BACKUP_MODEL_NAME} "
+        f"timeout={LLM_PRIMARY_TIMEOUT_SECONDS}s "
+        f"sticky={LLM_FALLBACK_STICKY_SECONDS}s"
     )
 else:
     _backup_text_model = None
@@ -161,13 +177,13 @@ _cached_model = FallbackModel(
     primary=_primary_text_model,
     backup=_backup_text_model,
     router=_fallback_router,
-    primary_timeout_seconds=OLLAMA_PRIMARY_TIMEOUT_SECONDS,
+    primary_timeout_seconds=LLM_PRIMARY_TIMEOUT_SECONDS,
 )
 _cached_vision_model = FallbackModel(
     primary=_primary_vision_model,
     backup=_backup_vision_model,
     router=_fallback_router,
-    primary_timeout_seconds=OLLAMA_PRIMARY_TIMEOUT_SECONDS,
+    primary_timeout_seconds=LLM_PRIMARY_TIMEOUT_SECONDS,
 )
 
 
@@ -216,9 +232,9 @@ WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "distil-small.en")
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))
 WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() == "true"
 # CPU by default. device="auto" used to grab CUDA and hold ~2GB of VRAM for the
-# life of the process even if no voice note ever arrived — memory Ollama needs
-# for the main model. Set WHISPER_DEVICE=cuda (optionally with an index, e.g.
-# "cuda:1" to keep it off the GPU serving Ollama) if you would rather have the
+# life of the process even if no voice note ever arrived — memory the LLM
+# server needs for the main model. Set WHISPER_DEVICE=cuda (optionally with an index, e.g.
+# "cuda:1" to keep it off the GPU serving the LLM) if you would rather have the
 # speed.
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 # int8 is the right default on CPU: ~4x smaller than float32 and faster, with

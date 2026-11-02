@@ -1,4 +1,4 @@
-"""Failover wrapper that routes model calls between a primary and backup Ollama.
+"""Failover wrapper that routes model calls between a primary and backup LLM server.
 
 Backup is treated as a degraded experience: we leave it as soon as the primary
 recovers. State is shared across all FallbackModel instances that point at the
@@ -59,14 +59,14 @@ class FallbackRouter:
     async def mark_primary_failed(self) -> None:
         async with self._lock:
             if not self._on_backup:
-                logger.warning("Primary Ollama failed; switching to backup")
+                logger.warning("Primary LLM failed; switching to backup")
             self._on_backup = True
             self._backup_started_at = time.monotonic()
 
     async def mark_primary_healthy(self) -> None:
         async with self._lock:
             if self._on_backup:
-                logger.warning("Primary Ollama recovered; leaving backup")
+                logger.warning("Primary LLM recovered; leaving backup")
             self._on_backup = False
             self._backup_started_at = 0.0
 
@@ -139,7 +139,7 @@ class FallbackModel(Model):
         except Exception as e:
             if not _is_primary_failure(e):
                 raise
-            logger.warning(f"Primary Ollama call failed ({e!r}); retrying on backup")
+            logger.warning(f"Primary LLM call failed ({e!r}); retrying on backup")
             await self._router.mark_primary_failed()
             return await self._backup.get_response(*args, **kwargs)
 
@@ -180,7 +180,7 @@ class FallbackModel(Model):
         except Exception as e:
             if not _is_primary_failure(e):
                 raise
-            logger.warning(f"Primary Ollama stream failed ({e!r}); retrying on backup")
+            logger.warning(f"Primary LLM stream failed ({e!r}); retrying on backup")
             await self._router.mark_primary_failed()
             async for chunk in self._backup.stream_response(*args, **kwargs):
                 yield chunk

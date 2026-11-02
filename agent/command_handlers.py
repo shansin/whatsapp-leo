@@ -497,7 +497,7 @@ async def handle_tz_command(message: ReceivedMessage):
 
 
 MODEL_HELP = """🤖 *Model*
-• `#model` — list the models Ollama has installed
+• `#model` — list the models the LLM server offers
 • `#model set <name>` — switch the main text model
 • `#model vision <name>` — switch the vision model
 • `#model reset` — back to the .env defaults
@@ -507,23 +507,23 @@ restart._"""
 
 
 async def _switch_model(message: ReceivedMessage, name: str, *, vision: bool) -> None:
-    """Validate `name` against Ollama, then switch and persist it."""
+    """Validate `name` against the LLM server, then switch and persist it."""
     import model_override
-    import ollama_models
+    import llm_models
     from agent_factory import agent_factory
 
     try:
-        available = await ollama_models.list_models()
+        available = await llm_models.list_models()
     except Exception as e:
-        logger.error(f"Could not list Ollama models: {e}")
-        await _reply(message, f"❌ Couldn't reach Ollama to check that model: {e}")
+        logger.error(f"Could not list LLM models: {e}")
+        await _reply(message, f"❌ Couldn't reach the LLM server to check that model: {e}")
         return
 
     # An unrecognised name would 404 on every subsequent message with no
     # obvious cause, so refuse it here and show what is actually installed.
-    resolved = ollama_models.resolve(name, available)
+    resolved = llm_models.resolve(name, available)
     if not resolved:
-        options = ollama_models.candidates(name, available) or available
+        options = llm_models.candidates(name, available) or available
         header = (
             f"❓ *{name}* is ambiguous — which one?"
             if len(options) < len(available)
@@ -568,17 +568,17 @@ async def _reset_models(message: ReceivedMessage) -> None:
 
 
 async def _list_models(message: ReceivedMessage) -> None:
-    import ollama_models
+    import llm_models
 
     try:
-        available = await ollama_models.list_models()
+        available = await llm_models.list_models()
     except Exception as e:
-        logger.error(f"Could not list Ollama models: {e}")
-        await _reply(message, f"❌ Couldn't reach Ollama: {e}")
+        logger.error(f"Could not list LLM models: {e}")
+        await _reply(message, f"❌ Couldn't reach the LLM server: {e}")
         return
 
     if not available:
-        await _reply(message, "🤖 Ollama reports no installed models.")
+        await _reply(message, "🤖 The LLM server reports no models.")
         return
 
     lines = ["🤖 *Installed models*\n"]
@@ -595,7 +595,7 @@ async def _list_models(message: ReceivedMessage) -> None:
 
 
 async def handle_model_command(message: ReceivedMessage):
-    """Handle #model — list installed Ollama models and switch the active one."""
+    """Handle #model — list the served models and switch the active one."""
     parts = message.content.strip().split(maxsplit=2)
     subcommand = parts[1].lower() if len(parts) > 1 else "list"
 
@@ -644,7 +644,7 @@ HELP_TEXT = """🦁 *Leo — Commands*
 • `#tz` — show yours · `#tz Europe/London` — set it
 
 *🤖 Model*
-• `#model` — list installed Ollama models
+• `#model` — list available models
 • `#model set <name>` — switch the main model · `#model vision <name>`
 • `#model reset` — back to the configured defaults
 
@@ -691,7 +691,7 @@ async def handle_status_command(message: ReceivedMessage):
     from agent_factory import agent_factory
     from config import (
         MODEL_NAME,
-        OLLAMA_BACKUP_MODEL_NAME,
+        LLM_BACKUP_MODEL_NAME,
         VISION_MODEL_NAME,
         _fallback_router,
     )
@@ -705,7 +705,7 @@ async def handle_status_command(message: ReceivedMessage):
     # Which model is actually answering right now.
     on_backup = await _fallback_router.should_use_backup()
     if on_backup:
-        lines.append(f"*Model:* ⚠️ backup — {OLLAMA_BACKUP_MODEL_NAME}")
+        lines.append(f"*Model:* ⚠️ backup — {LLM_BACKUP_MODEL_NAME}")
     else:
         lines.append(f"*Model:* {MODEL_NAME}")
     lines.append(f"*Vision:* {VISION_MODEL_NAME}")

@@ -19,15 +19,15 @@ from logging_setup import logger, log_deque
 from whatsapp import send_message as whatsapp_send_message
 from reminder import ReminderScheduler, RecurringReminderScheduler
 from briefing import BriefingScheduler
-import ollama_models
+import llm_models
 
 
-def get_ollama_models():
-    """Model names from the local Ollama, or a usable guess if it is unreachable."""
+def get_served_models():
+    """Model names from the LLM server, or a usable guess if it is unreachable."""
     try:
-        return ollama_models.list_models_sync()
+        return llm_models.list_models_sync()
     except Exception as e:
-        logger.error(f"Failed to fetch Ollama models: {e}")
+        logger.error(f"Failed to fetch LLM models: {e}")
         return [MODEL_NAME] if MODEL_NAME else ["llama3"]
 
 
@@ -41,7 +41,7 @@ def start_test_ui():
 
     logger.info("Starting Gradio Test Mode UI...")
 
-    available_models = get_ollama_models()
+    available_models = get_served_models()
     default_model = MODEL_NAME if MODEL_NAME in available_models else (available_models[0] if available_models else "")
 
     with gr.Blocks(title="WhatsApp Leo - Test Mode") as app:

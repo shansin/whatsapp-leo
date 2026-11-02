@@ -78,7 +78,7 @@ Communication between the two processes uses **Unix domain sockets** (paths conf
 - Reminders, briefings and the clock Leo reports all follow the sender's timezone, falling back to `DEFAULT_TZ`
 
 ### 🤖 Live model switching
-- `#model` lists what Ollama actually has installed, marking the active text (✅) and vision (👁) models
+- `#model` lists what the LLM server actually serves (`/v1/models`), marking the active text (✅) and vision (👁) models
 - `#model set <name>` switches the running instance — chats, briefings and reminder parsing all follow — with no restart and no dropped MCP servers
 - The choice is persisted, so it survives a restart; `#model reset` returns to `MODEL_NAME` / `VISION_MODEL_NAME`
 - Unknown names are refused against the installed list, so a typo can't leave Leo 404ing on every message
@@ -361,9 +361,10 @@ Every value can be changed later by editing `.env` directly.
 | Variable | Description | Default |
 |---|---|---|
 | `INSTANCE_GUID` | Unique ID for this instance (allows multiple instances) | `default` |
-| `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:11434/v1` |
-| `MODEL_NAME` | Ollama model to use (e.g. `qwen3.5:35b`) | — |
-| `VISION_MODEL_NAME` | Ollama model for image messages | `gemma3:27b` |
+| `LLM_BASE_URL` | OpenAI-compatible LLM endpoint (SGLang, vLLM or Ollama); `OLLAMA_BASE_URL` still works | — |
+| `LLM_REASONING_EFFORT` | Reasoning effort per call (`low`/`medium`/`xhigh`); empty = server default | — |
+| `MODEL_NAME` | Model to use, as listed by the server's `/v1/models` (e.g. `qwen3.8`) | — |
+| `VISION_MODEL_NAME` | Model for image messages | `gemma3:27b` |
 | `MAX_IMAGE_DIMENSION` | Max pixel dimension before downscaling images | `1280` |
 | `WHISPER_MODEL_SIZE` | faster-whisper model (tiny/base/small/medium/large, or distil-*.en) | `distil-small.en` |
 | `WHISPER_BEAM_SIZE` | Decoding beam width; 1 is greedy and much faster | `1` |
@@ -598,7 +599,7 @@ CI (`.github/workflows/ci.yml`) runs the same checks on push and PR.
 | `#briefing run <id>` | Run a briefing immediately (test it) |
 | `#briefing pause <id>` / `#briefing resume <id>` | Disable or re-enable a briefing |
 | `#tz` / `#tz Europe/London` | Show or set your timezone |
-| `#model` | List the models Ollama has installed |
+| `#model` | List the models the LLM server serves |
 | `#model set <name>` / `#model vision <name>` | Switch the main or vision model live |
 | `#model reset` | Go back to the `MODEL_NAME` / `VISION_MODEL_NAME` defaults |
 | `#status` | Model in use, MCP health, uptime, recent errors |

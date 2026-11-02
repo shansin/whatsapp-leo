@@ -1,4 +1,4 @@
-"""Tests for #model — listing and live-switching the Ollama model."""
+"""Tests for #model — listing and live-switching the LLM model."""
 
 import importlib
 
@@ -8,7 +8,7 @@ import command_handlers
 import config
 import message_handler
 import model_override
-import ollama_models
+import llm_models
 from message_handler import match_command
 
 pytestmark = pytest.mark.asyncio
@@ -58,7 +58,7 @@ def isolated(monkeypatch, tmp_path):
         model_override, "OVERRIDE_PATH", str(tmp_path / "model_override.json")
     )
     monkeypatch.setattr(
-        ollama_models, "list_models", _stub_list(INSTALLED)
+        llm_models, "list_models", _stub_list(INSTALLED)
     )
     before_text, before_vision = config.MODEL_NAME, config.VISION_MODEL_NAME
     before_model = config._cached_model
@@ -121,13 +121,13 @@ async def test_list_marks_the_active_models(sent, owner, isolated):
     assert "`gemma3:27b` 👁" in text
 
 
-async def test_list_reports_an_unreachable_ollama(sent, owner, isolated, monkeypatch):
+async def test_list_reports_an_unreachable_server(sent, owner, isolated, monkeypatch):
     async def boom(base_url=None):
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(ollama_models, "list_models", boom)
+    monkeypatch.setattr(llm_models, "list_models", boom)
     await _run("#model list")
-    assert "Couldn't reach Ollama" in sent[0][1]
+    assert "Couldn't reach the LLM server" in sent[0][1]
 
 
 # ── Switching ────────────────────────────────────────────────────────────────
@@ -247,12 +247,12 @@ async def test_unreadable_override_file_is_not_fatal(monkeypatch, tmp_path):
     ],
 )
 async def test_resolve(typed, expected):
-    assert ollama_models.resolve(typed, INSTALLED) == expected
+    assert llm_models.resolve(typed, INSTALLED) == expected
 
 
 async def test_ambiguous_prefix_is_refused():
     """Silently picking one of several tags would be worse than asking."""
-    assert ollama_models.resolve("qwen3", ["qwen3:14b", "qwen3:32b"]) is None
+    assert llm_models.resolve("qwen3", ["qwen3:14b", "qwen3:32b"]) is None
 
 
 async def test_ambiguous_name_lists_only_the_candidates(
@@ -260,7 +260,7 @@ async def test_ambiguous_name_lists_only_the_candidates(
 ):
     """`gemma3` when several tags share the prefix is a question, not an error."""
     monkeypatch.setattr(
-        ollama_models, "list_models", _stub_list(["gemma3:12b", "gemma3:27b", "qwen3:14b"])
+        llm_models, "list_models", _stub_list(["gemma3:12b", "gemma3:27b", "qwen3:14b"])
     )
 
     await _run("#model set gemma3")
@@ -274,15 +274,34 @@ async def test_ambiguous_name_lists_only_the_candidates(
 @pytest.mark.parametrize(
     "base,expected",
     [
-        ("http://host:11434/v1", "http://host:11434/api/tags"),
-        ("http://host:11434", "http://host:11434/api/tags"),
-        ("http://host:11434/v1/", "http://host:11434/api/tags"),
+        ("http://host:30000/v1", "http://host:30000/v1/models"),
+        ("http://host:30000", "http://host:30000/v1/models"),
+        ("http://host:30000/v1/", "http://host:30000/v1/models"),
     ],
 )
-async def test_tags_url_strips_the_openai_compat_suffix(base, expected):
-    assert ollama_models.tags_url(base) == expected
+async def test_models_url_targets_the_openai_compat_list(base, expected):
+    assert llm_models.models_url(base) == expected
+
+
+async def test_list_models_reads_openai_model_ids(monkeypatch):
+    """SGLang and Ollama both answer /v1/models with {"data": [{"id": ...}]}."""
+    import httpx
+
+    payload = {"object": "list", "data": [{"id": "qwen3.8"}, {"id": "gemma3:27b"}, {}]}
+
+    def handler(request):
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json=payload)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+    )
+    assert await llm_models.list_models("http://host:30000/v1") == ["gemma3:27b", "qwen3.8"]
 
 
 async def test_command_handlers_module_imports_cleanly():
-    importlib.reload(ollama_models)
+    importlib.reload(llm_models)
     assert hasattr(command_handlers, "handle_model_command")
